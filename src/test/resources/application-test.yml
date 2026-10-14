@@ -2,3 +2,6 @@
 relay:
   admin-token: test-admin-token-0123456789
   master-key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=
+  delivery:
+    # 测试里由各用例自己创建 worker，避免后台线程把其他用例的任务投递到外网
+    enabled: false

@@ -21,22 +21,15 @@ import java.util.concurrent.Future;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.boot.test.context.SpringBootTest;
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc;
-import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
-import org.springframework.test.context.ActiveProfiles;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
-import party.huantongxue.relay.TestcontainersConfig;
+import party.huantongxue.relay.IntegrationTest;
 
 /** D1 验收：发事件后库里有 event + delivery；幂等、鉴权、租户隔离、订阅过滤。 */
-@SpringBootTest
-@AutoConfigureMockMvc
-@ActiveProfiles("test")
-@Import(TestcontainersConfig.class)
+@IntegrationTest
 class IngestIntegrationTest {
 
     private static final String ADMIN = "Bearer test-admin-token-0123456789";

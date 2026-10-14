@@ -1,0 +1,233 @@
+package party.huantongxue.relay.delivery;
+
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Semaphore;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.random.RandomGenerator;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.slf4j.MDC;
+
+/**
+ * 一个实例的投递循环：一个平台线程负责抢任务和定期清扫，每条投递在独立虚拟线程里执行。
+ *
+ * <p>并发用信号量限制而不是线程池大小：虚拟线程很便宜，真正稀缺的是下游端点和本机的连接/内存，
+ * 所以限制“在途投递数”（全局 + 单端点）才是对的。
+ *
+ * <p>多实例安全靠数据库：抢任务用 SKIP LOCKED，回写结果用 attempts 做 fencing，实例之间不需要互相通信。
+ */
+public class DeliveryWorker {
+
+    private static final Logger log = LoggerFactory.getLogger(DeliveryWorker.class);
+    private static final int SWEEP_BATCH = 500;
+    private static final Duration RELEASE_DELAY = Duration.ofSeconds(1);
+
+    private final String name;
+    private final DeliveryStore store;
+    private final DeliverySender sender;
+    private final DeliveryProperties props;
+    private final RandomGenerator random = RandomGenerator.getDefault();
+
+    private final Semaphore inFlight;
+    /** 单端点并发许可。端点数量有限（每租户几个到几十个），常驻 Map 的开销可以接受。 */
+    private final Map<Long, Semaphore> perEndpoint = new ConcurrentHashMap<>();
+    private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
+    private final CountDownLatch stopSignal = new CountDownLatch(1);
+    private final AtomicLong completed = new AtomicLong();
+    private volatile boolean running;
+    private Thread loop;
+    private long lastSweepNanos;
+
+    public DeliveryWorker(String name, DeliveryStore store, DeliverySender sender, DeliveryProperties props) {
+        this.name = name;
+        this.store = store;
+        this.sender = sender;
+        this.props = props;
+        this.inFlight = new Semaphore(props.maxConcurrency());
+    }
+
+    public synchronized void start() {
+        if (running) {
+            return;
+        }
+        running = true;
+        loop = Thread.ofPlatform().name("relay-claimer-" + name).start(this::runLoop);
+        log.info("delivery worker {} started (batch={}, maxConcurrency={}, perEndpoint={})",
+                name, props.batchSize(), props.maxConcurrency(), props.perEndpointConcurrency());
+    }
+
+    /**
+     * 优雅停机：先停止抢新任务，再等在途投递完成。超时仍未完成的会被中断，
+     * 它们的租约到期后由（任一实例的）清扫任务退回 PENDING，不会丢。
+     */
+    public synchronized void stop() {
+        if (!running) {
+            return;
+        }
+        running = false;
+        stopSignal.countDown();
+        try {
+            loop.join(props.shutdownTimeout().toMillis());
+            boolean drained = inFlight.tryAcquire(props.maxConcurrency(),
+                    props.shutdownTimeout().toMillis(), TimeUnit.MILLISECONDS);
+            if (drained) {
+                inFlight.release(props.maxConcurrency());
+            } else {
+                log.warn("delivery worker {}: in-flight deliveries did not finish within {}, interrupting; "
+                        + "their leases will expire and be swept", name, props.shutdownTimeout());
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } finally {
+            executor.shutdownNow();
+        }
+        log.info("delivery worker {} stopped after {} completed deliveries", name, completed.get());
+    }
+
+    public boolean isRunning() {
+        return running;
+    }
+
+    /** 本实例已完成（写回了结果）的投递数，测试用来证明多实例都参与了工作。 */
+    public long completedCount() {
+        return completed.get();
+    }
+
+    private void runLoop() {
+        while (running) {
+            try {
+                sweepIfDue();
+                int dispatched = pollOnce();
+                if (dispatched == 0) {
+                    stopSignal.await(props.pollInterval().toMillis(), TimeUnit.MILLISECONDS);
+                }
+            } catch (InterruptedException e) {
+                Thread.currentThread().interrupt();
+                return;
+            } catch (RuntimeException e) {
+                // 数据库短暂不可用等：记录后退避一个轮询周期再试，循环本身不能死
+                log.error("delivery worker {} poll failed", name, e);
+                try {
+                    stopSignal.await(props.pollInterval().toMillis(), TimeUnit.MILLISECONDS);
+                } catch (InterruptedException ie) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
+        }
+    }
+
+    /** 抢一批并分发；返回分发条数。只在空闲许可范围内抢，避免抢到了却没并发额度去发、白白占着租约。 */
+    int pollOnce() throws InterruptedException {
+        int free = inFlight.availablePermits();
+        if (free == 0) {
+            // 满载：等任一在途投递结束再抢
+            inFlight.acquire();
+            inFlight.release();
+            return 0;
+        }
+        List<ClaimedDelivery> claimed = store.claim(Math.min(props.batchSize(), free), props.lease());
+        for (ClaimedDelivery d : claimed) {
+            inFlight.acquire();
+            executor.execute(() -> {
+                try {
+                    deliver(d);
+                } finally {
+                    inFlight.release();
+                }
+            });
+        }
+        return claimed.size();
+    }
+
+    void sweepIfDue() {
+        long now = System.nanoTime();
+        if (now - lastSweepNanos < props.sweepInterval().toNanos()) {
+            return;
+        }
+        lastSweepNanos = now;
+        int swept = store.sweepExpiredLeases(SWEEP_BATCH);
+        if (swept > 0) {
+            log.warn("delivery worker {} returned {} expired leases to PENDING", name, swept);
+        }
+    }
+
+    void deliver(ClaimedDelivery d) {
+        MDC.put("delivery_id", Long.toString(d.getId()));
+        MDC.put("event_id", Long.toString(d.getEventId()));
+        try {
+            if (d.isEndpointDeleted() || !d.isEndpointEnabled()) {
+                finish(d, store.dead(d, null, d.isEndpointDeleted() ? "endpoint deleted" : "endpoint disabled"));
+                return;
+            }
+            if (d.getAttempts() > d.getMaxAttempts()) {
+                // 只会出现在“租约过期被清扫”之后：那次尝试可能已送达，已计入次数
+                finish(d, store.dead(d, null, "attempts exhausted (lease expired on last attempt)"));
+                return;
+            }
+            Semaphore endpointPermits = perEndpoint.computeIfAbsent(d.getEndpointId(),
+                    id -> new Semaphore(props.perEndpointConcurrency()));
+            if (!endpointPermits.tryAcquire(props.endpointPermitWait().toMillis(), TimeUnit.MILLISECONDS)) {
+                // 该端点太慢、排队太久：不发，退回 PENDING 并撤销计数，免得租约在途中过期
+                store.releaseUnattempted(d, RELEASE_DELAY);
+                return;
+            }
+            try {
+                handle(d, sender.send(d));
+            } finally {
+                endpointPermits.release();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        } catch (RuntimeException e) {
+            // 写回失败（如数据库抖动）：不再重试写，租约到期后清扫会让它重新投递（至少一次）
+            log.error("delivery {} failed to record outcome", d.getId(), e);
+        } finally {
+            MDC.remove("delivery_id");
+            MDC.remove("event_id");
+        }
+    }
+
+    private void handle(ClaimedDelivery d, DeliverySender.Result r) {
+        DeliveryAttempt attempt = new DeliveryAttempt();
+        attempt.setDeliveryId(d.getId());
+        attempt.setAttemptNo(d.getAttempts());
+        attempt.setStartedAt(r.startedAt());
+        attempt.setDurationMs(r.durationMs());
+        attempt.setStatusCode(r.statusCode());
+        attempt.setError(DeliveryStore.truncate(r.error(), 512));
+        attempt.setResponseSnippet(r.snippet());
+
+        switch (RetryPolicy.classify(r.statusCode())) {
+            case SUCCESS -> finish(d, store.succeeded(d, attempt));
+            case PERMANENT -> finish(d, store.dead(d, attempt, "non-retryable HTTP " + r.statusCode()));
+            case RETRY -> {
+                String reason = r.error() != null ? r.error() : "HTTP " + r.statusCode();
+                if (d.getAttempts() >= d.getMaxAttempts()) {
+                    finish(d, store.dead(d, attempt, "attempts exhausted: " + reason));
+                } else {
+                    attempt.setError(DeliveryStore.truncate(reason, 512));
+                    Duration delay = RetryPolicy.backoff(d.getAttempts(), props.backoffBase(), props.backoffMax(),
+                            r.retryAfter(), random);
+                    finish(d, store.retry(d, attempt, delay));
+                }
+            }
+        }
+    }
+
+    private void finish(ClaimedDelivery d, boolean updated) {
+        if (updated) {
+            completed.incrementAndGet();
+        } else {
+            log.warn("delivery {} attempt {} lost its lease; result kept as attempt record only",
+                    d.getId(), d.getAttempts());
+        }
+    }
+}

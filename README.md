@@ -54,3 +54,8 @@ curl -X POST localhost:8080/api/v1/events \
 - **幂等**：`UNIQUE(tenant_id, idempotency_key)` 兜底；并发同键请求只有一个插入成功，其余读回已提交结果。另存请求摘要，同键不同内容判为冲突。
 - **密钥**：API Key 为 256 位随机数，只存 SHA-256；端点 secret 需要明文签名，用 AES-256-GCM 加密存储，主密钥来自环境变量。
 - **租户隔离**：所有查询带 `tenant_id`，跨租户访问一律 404。
+- **抢任务**：`SELECT … FOR UPDATE SKIP LOCKED` 与改为 `IN_FLIGHT`、设租约在同一短事务；提交后才发 HTTP，网络请求不占行锁和连接。多实例无需互相通信。
+- **租约与 fencing**：实例崩溃后租约过期，清扫任务退回 `PENDING`；回写结果带 `attempts` 条件，旧实例的迟到结果不会覆盖新一轮投递。
+- **重试**：2xx 成功；网络错误、超时、408、429、5xx 按指数退避 + 抖动重试（尊重 `Retry-After`）；其余 4xx/3xx 直接死信；每次尝试写 `delivery_attempt`（响应体截断 1 KB）。
+- **并发**：虚拟线程执行投递，用信号量限制全局与单端点在途数，而不是靠线程池大小。
+- **至少一次**：每次请求带 `X-Relay-Event-Id`、`X-Relay-Delivery-Id`、`X-Relay-Attempt`，接收方按事件 ID 去重。

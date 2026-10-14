@@ -25,4 +25,76 @@
         WHERE event_id = #{eventId} AND tenant_id = #{tenantId}
         ORDER BY id
     </select>
+
+    <!--
+      抢任务。走 idx_delivery_claim(status, next_attempt_at)；时间一律用数据库 NOW(3)，
+      多实例之间不受各自机器时钟偏差影响。SKIP LOCKED：其他实例已锁的行直接跳过，不排队等待。
+    -->
+    <select id="lockClaimable" resultType="long">
+        SELECT id FROM delivery
+        WHERE status = 'PENDING' AND next_attempt_at &lt;= NOW(3)
+        ORDER BY next_attempt_at
+        LIMIT #{limit}
+        FOR UPDATE SKIP LOCKED
+    </select>
+
+    <update id="markInFlight">
+        UPDATE delivery
+        SET status = 'IN_FLIGHT', attempts = attempts + 1,
+            lease_until = DATE_ADD(NOW(3), INTERVAL #{leaseMs} * 1000 MICROSECOND)
+        WHERE status = 'PENDING' AND id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </update>
+
+    <select id="findClaimed" resultType="party.huantongxue.relay.delivery.ClaimedDelivery">
+        SELECT d.id, d.tenant_id, d.event_id, d.endpoint_id, d.attempts,
+               e.type AS event_type, e.payload, e.created_at AS event_created_at,
+               ep.url, ep.secret_ciphertext, ep.enabled AS endpoint_enabled,
+               (ep.deleted_at IS NOT NULL) AS endpoint_deleted, ep.max_attempts
+        FROM delivery d
+        JOIN event e ON e.id = d.event_id
+        JOIN endpoint ep ON ep.id = d.endpoint_id
+        WHERE d.status = 'IN_FLIGHT' AND d.id IN
+        <foreach collection="ids" item="id" open="(" separator="," close=")">#{id}</foreach>
+    </select>
+
+    <insert id="insertAttempt" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO delivery_attempt (delivery_id, attempt_no, started_at, duration_ms, status_code, error, response_snippet)
+        VALUES (#{deliveryId}, #{attemptNo}, #{startedAt}, #{durationMs}, #{statusCode}, #{error}, #{responseSnippet})
+    </insert>
+
+    <update id="markSucceeded">
+        UPDATE delivery
+        SET status = 'SUCCEEDED', lease_until = NULL, last_status_code = #{statusCode}, last_error = NULL
+        WHERE id = #{id} AND status = 'IN_FLIGHT' AND attempts = #{attempts}
+    </update>
+
+    <update id="markRetry">
+        UPDATE delivery
+        SET status = 'PENDING', lease_until = NULL,
+            next_attempt_at = DATE_ADD(NOW(3), INTERVAL #{delayMs} * 1000 MICROSECOND),
+            last_status_code = #{statusCode}, last_error = #{error}
+        WHERE id = #{id} AND status = 'IN_FLIGHT' AND attempts = #{attempts}
+    </update>
+
+    <update id="markDead">
+        UPDATE delivery
+        SET status = 'DEAD', lease_until = NULL, last_status_code = #{statusCode}, last_error = #{error}
+        WHERE id = #{id} AND status = 'IN_FLIGHT' AND attempts = #{attempts}
+    </update>
+
+    <update id="releaseUnattempted">
+        UPDATE delivery
+        SET status = 'PENDING', lease_until = NULL, attempts = attempts - 1,
+            next_attempt_at = DATE_ADD(NOW(3), INTERVAL #{delayMs} * 1000 MICROSECOND)
+        WHERE id = #{id} AND status = 'IN_FLIGHT' AND attempts = #{attempts}
+    </update>
+
+    <!-- 走 idx_delivery_lease(status, lease_until)；attempts 不回退：崩溃前那次可能已送达，计入次数 -->
+    <update id="sweepExpiredLeases">
+        UPDATE delivery
+        SET status = 'PENDING', lease_until = NULL, next_attempt_at = NOW(3), last_error = 'lease expired'
+        WHERE status = 'IN_FLIGHT' AND lease_until &lt; NOW(3)
+        LIMIT #{limit}
+    </update>
 </mapper>
