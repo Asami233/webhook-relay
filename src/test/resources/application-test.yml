@@ -1,0 +1,4 @@
+# 仅测试用的固定值，不得用于任何部署
+relay:
+  admin-token: test-admin-token-0123456789
+  master-key: AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=

@@ -1,0 +1,98 @@
+package party.huantongxue.relay.event;
+
+import com.fasterxml.jackson.annotation.JsonRawValue;
+import jakarta.validation.Valid;
+import jakarta.validation.constraints.Max;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.NotNull;
+import java.time.Instant;
+import java.util.List;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.validation.annotation.Validated;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestHeader;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import party.huantongxue.relay.common.ApiException;
+import party.huantongxue.relay.delivery.Delivery;
+import party.huantongxue.relay.delivery.DeliveryMapper;
+import party.huantongxue.relay.delivery.DeliveryStatus;
+import party.huantongxue.relay.security.TenantPrincipal;
+import tools.jackson.databind.JsonNode;
+
+@Validated
+@RestController
+@RequestMapping("/api/v1/events")
+public class EventController {
+
+    static final String REPLAYED_HEADER = "Idempotent-Replayed";
+
+    private final EventService service;
+    private final EventMapper events;
+    private final DeliveryMapper deliveries;
+
+    public EventController(EventService service, EventMapper events, DeliveryMapper deliveries) {
+        this.service = service;
+        this.events = events;
+        this.deliveries = deliveries;
+    }
+
+    public record IngestRequest(@NotBlank String type, @NotNull JsonNode payload) {
+    }
+
+    public record Accepted(long eventId, int deliveries) {
+    }
+
+    public record EventSummary(long id, String type, String idempotencyKey, Instant createdAt) {
+        static EventSummary of(Event e) {
+            return new EventSummary(e.getId(), e.getType(), e.getIdempotencyKey(), e.getCreatedAt());
+        }
+    }
+
+    public record DeliveryView(long id, long endpointId, DeliveryStatus status, int attempts, Instant nextAttemptAt,
+                               Integer lastStatusCode, String lastError, Instant updatedAt) {
+        static DeliveryView of(Delivery d) {
+            return new DeliveryView(d.getId(), d.getEndpointId(), d.getStatus(), d.getAttempts(), d.getNextAttemptAt(),
+                    d.getLastStatusCode(), d.getLastError(), d.getUpdatedAt());
+        }
+    }
+
+    public record EventDetail(long id, String type, String idempotencyKey, @JsonRawValue String payload,
+                              Instant createdAt, List<DeliveryView> deliveries) {
+    }
+
+    /** 202：已持久化、尚未投递。重复的 Idempotency-Key 返回首次结果并带 {@value #REPLAYED_HEADER}: true。 */
+    @PostMapping
+    public ResponseEntity<Accepted> ingest(TenantPrincipal tenant,
+                                           @RequestHeader("Idempotency-Key") String idempotencyKey,
+                                           @Valid @RequestBody IngestRequest request) {
+        EventService.IngestResult result = service.ingest(tenant.id(), idempotencyKey, request.type(),
+                request.payload().toString());
+        return ResponseEntity.status(HttpStatus.ACCEPTED)
+                .header(REPLAYED_HEADER, Boolean.toString(result.replayed()))
+                .body(new Accepted(result.eventId(), result.deliveries()));
+    }
+
+    @GetMapping
+    public List<EventSummary> list(TenantPrincipal tenant,
+                                   @RequestParam(required = false) Long before,
+                                   @RequestParam(defaultValue = "50") @Min(1) @Max(200) int limit) {
+        return events.findPage(tenant.id(), before, limit).stream().map(EventSummary::of).toList();
+    }
+
+    @GetMapping("/{id}")
+    public EventDetail get(TenantPrincipal tenant, @PathVariable long id) {
+        Event e = events.findById(tenant.id(), id);
+        if (e == null) {
+            throw ApiException.notFound("event");
+        }
+        List<DeliveryView> ds = deliveries.findByEvent(tenant.id(), id).stream().map(DeliveryView::of).toList();
+        return new EventDetail(e.getId(), e.getType(), e.getIdempotencyKey(), e.getPayload(), e.getCreatedAt(), ds);
+    }
+}

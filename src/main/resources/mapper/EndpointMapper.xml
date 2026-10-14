@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="party.huantongxue.relay.endpoint.EndpointMapper">
+
+    <sql id="columns">
+        id, tenant_id, url, description, secret_ciphertext, event_types, enabled,
+        max_attempts, deliver_qps, created_at, updated_at
+    </sql>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO endpoint (tenant_id, url, description, secret_ciphertext, event_types, enabled, max_attempts, deliver_qps)
+        VALUES (#{tenantId}, #{url}, #{description}, #{secretCiphertext}, #{eventTypes}, #{enabled}, #{maxAttempts}, #{deliverQps})
+    </insert>
+
+    <select id="findById" resultType="party.huantongxue.relay.endpoint.Endpoint">
+        SELECT <include refid="columns"/> FROM endpoint
+        WHERE id = #{id} AND tenant_id = #{tenantId} AND deleted_at IS NULL
+    </select>
+
+    <select id="findByTenant" resultType="party.huantongxue.relay.endpoint.Endpoint">
+        SELECT <include refid="columns"/> FROM endpoint
+        WHERE tenant_id = #{tenantId} AND deleted_at IS NULL
+        ORDER BY id
+    </select>
+
+    <select id="findEnabledByTenant" resultType="party.huantongxue.relay.endpoint.Endpoint">
+        SELECT <include refid="columns"/> FROM endpoint
+        WHERE tenant_id = #{tenantId} AND deleted_at IS NULL AND enabled = 1
+    </select>
+
+    <update id="update">
+        UPDATE endpoint
+        SET url = #{url}, description = #{description}, event_types = #{eventTypes},
+            enabled = #{enabled}, max_attempts = #{maxAttempts}, deliver_qps = #{deliverQps}
+        WHERE id = #{id} AND tenant_id = #{tenantId} AND deleted_at IS NULL
+    </update>
+
+    <update id="updateSecret">
+        UPDATE endpoint SET secret_ciphertext = #{secret}
+        WHERE id = #{id} AND tenant_id = #{tenantId} AND deleted_at IS NULL
+    </update>
+
+    <update id="softDelete">
+        UPDATE endpoint SET deleted_at = NOW(3), enabled = 0
+        WHERE id = #{id} AND tenant_id = #{tenantId} AND deleted_at IS NULL
+    </update>
+</mapper>

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="party.huantongxue.relay.tenant.TenantMapper">
+
+    <sql id="columns">id, name, api_key_hash, api_key_prefix, ingest_qps, created_at</sql>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO tenant (name, api_key_hash, api_key_prefix, ingest_qps)
+        VALUES (#{name}, #{apiKeyHash}, #{apiKeyPrefix}, #{ingestQps})
+    </insert>
+
+    <select id="findById" resultType="party.huantongxue.relay.tenant.Tenant">
+        SELECT <include refid="columns"/> FROM tenant WHERE id = #{id}
+    </select>
+
+    <select id="findByApiKeyHash" resultType="party.huantongxue.relay.tenant.Tenant">
+        SELECT <include refid="columns"/> FROM tenant WHERE api_key_hash = #{apiKeyHash}
+    </select>
+
+    <select id="findAll" resultType="party.huantongxue.relay.tenant.Tenant">
+        SELECT <include refid="columns"/> FROM tenant ORDER BY id
+    </select>
+
+    <update id="updateApiKey">
+        UPDATE tenant SET api_key_hash = #{hash}, api_key_prefix = #{prefix} WHERE id = #{id}
+    </update>
+</mapper>

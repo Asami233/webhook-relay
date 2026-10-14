@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="party.huantongxue.relay.event.EventMapper">
+
+    <sql id="columns">id, tenant_id, idempotency_key, request_hash, type, payload, created_at</sql>
+
+    <insert id="insert" useGeneratedKeys="true" keyProperty="id">
+        INSERT INTO event (tenant_id, idempotency_key, request_hash, type, payload)
+        VALUES (#{tenantId}, #{idempotencyKey}, #{requestHash}, #{type}, #{payload})
+    </insert>
+
+    <select id="findById" resultType="party.huantongxue.relay.event.Event">
+        SELECT <include refid="columns"/> FROM event WHERE id = #{id} AND tenant_id = #{tenantId}
+    </select>
+
+    <select id="findByIdempotencyKey" resultType="party.huantongxue.relay.event.Event">
+        SELECT <include refid="columns"/> FROM event WHERE tenant_id = #{tenantId} AND idempotency_key = #{key}
+    </select>
+
+    <!-- 用 (tenant_id, id) 索引做键集分页，翻到深页也不需要 OFFSET 扫描 -->
+    <select id="findPage" resultType="party.huantongxue.relay.event.Event">
+        SELECT <include refid="columns"/> FROM event
+        WHERE tenant_id = #{tenantId}
+        <if test="beforeId != null">AND id &lt; #{beforeId}</if>
+        ORDER BY id DESC
+        LIMIT #{limit}
+    </select>
+</mapper>
