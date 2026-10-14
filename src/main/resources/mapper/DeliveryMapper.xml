@@ -50,7 +50,7 @@
         SELECT d.id, d.tenant_id, d.event_id, d.endpoint_id, d.attempts,
                e.type AS event_type, e.payload, e.created_at AS event_created_at,
                ep.url, ep.secret_ciphertext, ep.enabled AS endpoint_enabled,
-               (ep.deleted_at IS NOT NULL) AS endpoint_deleted, ep.max_attempts
+               (ep.deleted_at IS NOT NULL) AS endpoint_deleted, ep.max_attempts, ep.deliver_qps
         FROM delivery d
         JOIN event e ON e.id = d.event_id
         JOIN endpoint ep ON ep.id = d.endpoint_id

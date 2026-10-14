@@ -19,6 +19,13 @@ spring:
         forceConnectionTimeZoneToSession: true
       # 读已提交：抢任务的 SKIP LOCKED 查询不加间隙锁，幂等冲突后能读到对方已提交的行
       transaction-isolation: TRANSACTION_READ_COMMITTED
+  data:
+    redis:
+      host: ${RELAY_REDIS_HOST:localhost}
+      port: ${RELAY_REDIS_PORT:6379}
+      # Redis 只做加速与限流，故障时要快速失败并放行（fail-open），不能拖住接收接口
+      timeout: 500ms
+      connect-timeout: 500ms
   mvc:
     problemdetails:
       enabled: true
@@ -32,6 +39,9 @@ relay:
   admin-token: ${RELAY_ADMIN_TOKEN:}
   master-key: ${RELAY_MASTER_KEY:}
   max-payload-bytes: 65536
+  ssrf:
+    # 跳过 SSRF 检查的主机（按 URL 里的字面主机名精确匹配）。生产保持为空。
+    allowed-hosts: []
 
 management:
   endpoints:

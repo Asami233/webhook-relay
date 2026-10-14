@@ -20,6 +20,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param backoffMax             退避上限
  * @param sweepInterval          清扫过期租约的间隔
  * @param shutdownTimeout        优雅停机时等待在途投递的上限
+ * @param breakerThreshold       连续多少次可重试失败后熔断该端点
+ * @param breakerCooldown        熔断打开的时长
  */
 @ConfigurationProperties("relay.delivery")
 public record DeliveryProperties(
@@ -34,10 +36,12 @@ public record DeliveryProperties(
         @DefaultValue("5s") Duration backoffBase,
         @DefaultValue("1h") Duration backoffMax,
         @DefaultValue("10s") Duration sweepInterval,
-        @DefaultValue("20s") Duration shutdownTimeout) {
+        @DefaultValue("20s") Duration shutdownTimeout,
+        @DefaultValue("10") int breakerThreshold,
+        @DefaultValue("60s") Duration breakerCooldown) {
 
     public DeliveryProperties {
-        if (batchSize < 1 || maxConcurrency < 1 || perEndpointConcurrency < 1) {
+        if (batchSize < 1 || maxConcurrency < 1 || perEndpointConcurrency < 1 || breakerThreshold < 1) {
             throw new IllegalArgumentException("relay.delivery batch/concurrency settings must be >= 1");
         }
         if (lease.compareTo(requestTimeout.plus(connectTimeout).plusSeconds(5)) < 0) {

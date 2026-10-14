@@ -1,5 +1,6 @@
 package party.huantongxue.relay.common;
 
+import org.springframework.http.HttpHeaders;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -14,6 +15,10 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
     ResponseEntity<ProblemDetail> handleApi(ApiException e) {
         ProblemDetail body = ProblemDetail.forStatusAndDetail(e.getStatus(), e.getMessage());
         body.setProperty("code", e.getCode());
-        return ResponseEntity.status(e.getStatus()).body(body);
+        ResponseEntity.BodyBuilder response = ResponseEntity.status(e.getStatus());
+        if (e instanceof RateLimitedException limited) {
+            response.header(HttpHeaders.RETRY_AFTER, Long.toString(limited.retryAfterSeconds()));
+        }
+        return response.body(body);
     }
 }

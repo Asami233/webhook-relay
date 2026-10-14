@@ -5,3 +5,6 @@ relay:
   delivery:
     # 测试里由各用例自己创建 worker，避免后台线程把其他用例的任务投递到外网
     enabled: false
+  ssrf:
+    # 测试接收方监听 127.0.0.1；example.com 让接入类测试不依赖外部 DNS。localhost、10.x 等仍被拒绝。
+    allowed-hosts: [127.0.0.1, example.com]

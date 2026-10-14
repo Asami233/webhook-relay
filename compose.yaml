@@ -26,7 +26,8 @@ services:
 
   redis:
     image: redis:7-alpine
-    command: ["redis-server", "--maxmemory", "32mb", "--maxmemory-policy", "noeviction"]
+    # Redis 只存可丢的数据（幂等缓存、限流/熔断状态，均带 TTL）：满了就淘汰最久未用的，而不是拒绝写入
+    command: ["redis-server", "--maxmemory", "32mb", "--maxmemory-policy", "allkeys-lru", "--save", "", "--appendonly", "no"]
     ports:
       - "127.0.0.1:${RELAY_REDIS_PORT:-6379}:6379"
     healthcheck:

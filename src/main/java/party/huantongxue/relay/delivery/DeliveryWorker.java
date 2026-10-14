@@ -14,6 +14,7 @@ import java.util.random.RandomGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import party.huantongxue.relay.ssrf.SsrfGuard;
 
 /**
  * 一个实例的投递循环：一个平台线程负责抢任务和定期清扫，每条投递在独立虚拟线程里执行。
@@ -32,6 +33,8 @@ public class DeliveryWorker {
     private final String name;
     private final DeliveryStore store;
     private final DeliverySender sender;
+    private final SsrfGuard ssrf;
+    private final EndpointGuard guard;
     private final DeliveryProperties props;
     private final RandomGenerator random = RandomGenerator.getDefault();
 
@@ -45,10 +48,13 @@ public class DeliveryWorker {
     private Thread loop;
     private long lastSweepNanos;
 
-    public DeliveryWorker(String name, DeliveryStore store, DeliverySender sender, DeliveryProperties props) {
+    public DeliveryWorker(String name, DeliveryStore store, DeliverySender sender, SsrfGuard ssrf,
+                          EndpointGuard guard, DeliveryProperties props) {
         this.name = name;
         this.store = store;
         this.sender = sender;
+        this.ssrf = ssrf;
+        this.guard = guard;
         this.props = props;
         this.inFlight = new Semaphore(props.maxConcurrency());
     }
@@ -172,6 +178,16 @@ public class DeliveryWorker {
                 finish(d, store.dead(d, null, "attempts exhausted (lease expired on last attempt)"));
                 return;
             }
+            // 发送前再做一次 SSRF 检查：登记之后域名可能被改指向内网（DNS rebinding）
+            SsrfGuard.Decision target = ssrf.check(d.getUrl());
+            if (!target.allowed()) {
+                if (target.retryable()) {
+                    handle(d, DeliverySender.Result.notSent(target.reason()));
+                } else {
+                    finish(d, store.dead(d, null, "blocked by SSRF policy: " + target.reason()));
+                }
+                return;
+            }
             Semaphore endpointPermits = perEndpoint.computeIfAbsent(d.getEndpointId(),
                     id -> new Semaphore(props.perEndpointConcurrency()));
             if (!endpointPermits.tryAcquire(props.endpointPermitWait().toMillis(), TimeUnit.MILLISECONDS)) {
@@ -180,6 +196,17 @@ public class DeliveryWorker {
                 return;
             }
             try {
+                // 熔断与限流在拿到端点许可之后再判断：排队期间熔断可能已经打开，必须看最新状态
+                Duration open = guard.openFor(d.getEndpointId());
+                if (open != null) {
+                    store.releaseUnattempted(d, open);
+                    return;
+                }
+                Duration wait = guard.rateLimitWait(d.getEndpointId(), d.getDeliverQps());
+                if (wait != null) {
+                    store.releaseUnattempted(d, wait);
+                    return;
+                }
                 handle(d, sender.send(d));
             } finally {
                 endpointPermits.release();
@@ -206,9 +233,13 @@ public class DeliveryWorker {
         attempt.setResponseSnippet(r.snippet());
 
         switch (RetryPolicy.classify(r.statusCode())) {
-            case SUCCESS -> finish(d, store.succeeded(d, attempt));
+            case SUCCESS -> {
+                guard.recordSuccess(d.getEndpointId());
+                finish(d, store.succeeded(d, attempt));
+            }
             case PERMANENT -> finish(d, store.dead(d, attempt, "non-retryable HTTP " + r.statusCode()));
             case RETRY -> {
+                guard.recordFailure(d.getEndpointId(), props.breakerThreshold(), props.breakerCooldown());
                 String reason = r.error() != null ? r.error() : "HTTP " + r.statusCode();
                 if (d.getAttempts() >= d.getMaxAttempts()) {
                     finish(d, store.dead(d, attempt, "attempts exhausted: " + reason));

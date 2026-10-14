@@ -22,4 +22,5 @@ public class ClaimedDelivery {
     private boolean endpointEnabled;
     private boolean endpointDeleted;
     private int maxAttempts;
+    private int deliverQps;
 }

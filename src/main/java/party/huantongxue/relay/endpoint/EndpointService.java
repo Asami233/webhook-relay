@@ -8,6 +8,7 @@ import org.springframework.stereotype.Service;
 import party.huantongxue.relay.common.ApiException;
 import party.huantongxue.relay.security.SecretCipher;
 import party.huantongxue.relay.security.Tokens;
+import party.huantongxue.relay.ssrf.SsrfGuard;
 
 @Service
 public class EndpointService {
@@ -17,10 +18,12 @@ public class EndpointService {
 
     private final EndpointMapper endpoints;
     private final SecretCipher cipher;
+    private final SsrfGuard ssrf;
 
-    public EndpointService(EndpointMapper endpoints, SecretCipher cipher) {
+    public EndpointService(EndpointMapper endpoints, SecretCipher cipher, SsrfGuard ssrf) {
         this.endpoints = endpoints;
         this.cipher = cipher;
+        this.ssrf = ssrf;
     }
 
     /** 新建端点并返回 secret 明文（只此一次）。 */
@@ -29,7 +32,7 @@ public class EndpointService {
         String secret = Tokens.newEndpointSecret();
         Endpoint e = new Endpoint();
         e.setTenantId(tenantId);
-        e.setUrl(requireValidUrl(url));
+        e.setUrl(requireAllowedUrl(url));
         e.setDescription(description);
         e.setSecretCiphertext(cipher.encrypt(secret));
         e.setEventTypes(EventTypes.normalizePatterns(eventTypes));
@@ -57,7 +60,7 @@ public class EndpointService {
                            Boolean enabled, Integer maxAttempts, Integer deliverQps) {
         Endpoint e = get(tenantId, id);
         if (url != null) {
-            e.setUrl(requireValidUrl(url));
+            e.setUrl(requireAllowedUrl(url));
         }
         if (description != null) {
             e.setDescription(description);
@@ -94,7 +97,17 @@ public class EndpointService {
         }
     }
 
-    /** 语法校验。SSRF 防护（解析后拒绝内网地址）在 D3 加入，登记与投递两处都要做。 */
+    /** 语法校验 + SSRF 检查（投递前还会再查一次，见 DeliveryWorker）。 */
+    private String requireAllowedUrl(String raw) {
+        String url = requireValidUrl(raw);
+        SsrfGuard.Decision decision = ssrf.check(url);
+        if (!decision.allowed()) {
+            throw ApiException.badRequest(decision.retryable() ? "url_unresolvable" : "url_not_allowed",
+                    decision.reason());
+        }
+        return url;
+    }
+
     static String requireValidUrl(String raw) {
         if (raw == null || raw.isBlank() || raw.length() > 2048) {
             throw ApiException.badRequest("invalid_url", "url is required and at most 2048 chars");

@@ -20,9 +20,11 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import party.huantongxue.relay.common.ApiException;
+import party.huantongxue.relay.common.RateLimitedException;
 import party.huantongxue.relay.delivery.Delivery;
 import party.huantongxue.relay.delivery.DeliveryMapper;
 import party.huantongxue.relay.delivery.DeliveryStatus;
+import party.huantongxue.relay.ratelimit.TokenBucket;
 import party.huantongxue.relay.security.TenantPrincipal;
 import tools.jackson.databind.JsonNode;
 
@@ -36,11 +38,14 @@ public class EventController {
     private final EventService service;
     private final EventMapper events;
     private final DeliveryMapper deliveries;
+    private final TokenBucket rateLimiter;
 
-    public EventController(EventService service, EventMapper events, DeliveryMapper deliveries) {
+    public EventController(EventService service, EventMapper events, DeliveryMapper deliveries,
+                           TokenBucket rateLimiter) {
         this.service = service;
         this.events = events;
         this.deliveries = deliveries;
+        this.rateLimiter = rateLimiter;
     }
 
     public record IngestRequest(@NotBlank String type, @NotNull JsonNode payload) {
@@ -67,11 +72,19 @@ public class EventController {
                               Instant createdAt, List<DeliveryView> deliveries) {
     }
 
-    /** 202：已持久化、尚未投递。重复的 Idempotency-Key 返回首次结果并带 {@value #REPLAYED_HEADER}: true。 */
+    /**
+     * 202：已持久化、尚未投递。重复的 Idempotency-Key 返回首次结果并带 {@value #REPLAYED_HEADER}: true。
+     * 先按租户限流（重放也计数，否则可以用重放请求绕过限流打满接口），再走幂等与写库。
+     */
     @PostMapping
     public ResponseEntity<Accepted> ingest(TenantPrincipal tenant,
                                            @RequestHeader("Idempotency-Key") String idempotencyKey,
                                            @Valid @RequestBody IngestRequest request) {
+        TokenBucket.Result limit = rateLimiter.tryAcquire("relay:rl:ingest:" + tenant.id(),
+                tenant.ingestQps(), tenant.ingestQps());
+        if (!limit.allowed()) {
+            throw new RateLimitedException(limit.retryAfter());
+        }
         EventService.IngestResult result = service.ingest(tenant.id(), idempotencyKey, request.type(),
                 request.payload().toString());
         return ResponseEntity.status(HttpStatus.ACCEPTED)

@@ -13,11 +13,13 @@ import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.concurrent.Executors;
+import party.huantongxue.relay.security.SecretCipher;
+import party.huantongxue.relay.signature.WebhookSignature;
 
 /**
  * 发出一次 HTTP 投递。阻塞式调用，运行在虚拟线程上：等待网络时不占平台线程，几百个在途请求也只需少量载体线程。
  *
- * <p>不跟随重定向：3xx 按永久失败处理，避免被引导到内网地址（SSRF 校验见 D3）。
+ * <p>不跟随重定向：3xx 按永久失败处理，避免被 302 引导到内网地址（目标地址本身由 {@code SsrfGuard} 在发送前校验）。
  */
 public class DeliverySender {
 
@@ -26,8 +28,10 @@ public class DeliverySender {
 
     private final HttpClient client;
     private final Duration requestTimeout;
+    private final SecretCipher cipher;
 
-    public DeliverySender(DeliveryProperties props) {
+    public DeliverySender(DeliveryProperties props, SecretCipher cipher) {
+        this.cipher = cipher;
         this.client = HttpClient.newBuilder()
                 .connectTimeout(props.connectTimeout())
                 .followRedirects(HttpClient.Redirect.NEVER)
@@ -39,9 +43,18 @@ public class DeliverySender {
     /** 一次尝试的结果；statusCode 为 null 表示没拿到 HTTP 响应（网络错误/超时）。 */
     public record Result(Instant startedAt, int durationMs, Integer statusCode, String error, String snippet,
                          Duration retryAfter) {
+
+        /** 发送前就失败（如 DNS 解析不到）：照常记一次尝试并按可重试处理。 */
+        static Result notSent(String error) {
+            return new Result(Instant.now(), 0, null, error, null, null);
+        }
     }
 
     public Result send(ClaimedDelivery d) {
+        String body = body(d);
+        // 每次尝试用当前时间重新签名：重试时时间戳是新的，不会因为退避太久落到接收方的容忍窗口之外
+        String signature = WebhookSignature.sign(cipher.decrypt(d.getSecretCiphertext()),
+                Instant.now().getEpochSecond(), body);
         HttpRequest request = HttpRequest.newBuilder(URI.create(d.getUrl()))
                 .timeout(requestTimeout)
                 .header("Content-Type", "application/json")
@@ -50,7 +63,8 @@ public class DeliverySender {
                 .header("X-Relay-Event-Type", d.getEventType())
                 .header("X-Relay-Delivery-Id", Long.toString(d.getId()))
                 .header("X-Relay-Attempt", Integer.toString(d.getAttempts()))
-                .POST(HttpRequest.BodyPublishers.ofString(body(d), StandardCharsets.UTF_8))
+                .header(WebhookSignature.HEADER, signature)
+                .POST(HttpRequest.BodyPublishers.ofString(body, StandardCharsets.UTF_8))
                 .build();
 
         Instant started = Instant.now();

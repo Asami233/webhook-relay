@@ -19,7 +19,7 @@ import java.util.function.IntUnaryOperator;
  */
 final class TestReceiver implements AutoCloseable {
 
-    record Received(long deliveryId, int attempt, String body) {
+    record Received(long deliveryId, int attempt, String body, String signature, long receivedAtNanos) {
     }
 
     private final HttpServer server;
@@ -43,7 +43,8 @@ final class TestReceiver implements AutoCloseable {
                     Thread.sleep(delay);
                 }
                 int status = statusForArrival.applyAsInt(arrival);
-                received.add(new Received(deliveryId, attempt, body));
+                received.add(new Received(deliveryId, attempt, body,
+                        exchange.getRequestHeaders().getFirst("X-Relay-Signature"), System.nanoTime()));
                 byte[] out = ("status " + status).getBytes(StandardCharsets.UTF_8);
                 exchange.sendResponseHeaders(status, out.length);
                 try (OutputStream os = exchange.getResponseBody()) {

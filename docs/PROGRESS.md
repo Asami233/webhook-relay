@@ -32,6 +32,24 @@
   - 连接被拒时错误信息为 `connect failed: null`，改为沿 cause 链取描述。
 - 未做/限制：人工重放（DEAD → PENDING）需要在不破坏 `(delivery_id, attempt_no)` 唯一约束的前提下追加尝试预算，放到 D6 控制台一起做（需新迁移）；在 Windows 上 `Stop-Process` 是硬杀，真实进程的优雅停机只由测试覆盖。
 
-## D3 幂等·限流·签名 — 未开始
+- 线上：已推送（ed32d1c）。
 
-Redis 幂等快速路径 + 唯一索引兜底、Lua 令牌桶（接收侧）、HMAC 签名 + 校验示例、SSRF 防护（登记与投递两处；测试用接收方在 127.0.0.1，需要显式的允许内网开关，默认关闭）；应做：投递侧限流、端点熔断。
+## D3 幂等·限流·签名 — 完成（2026-10-14）
+
+- 必做全部完成：
+  - Redis 幂等快速路径（`IdempotencyCache`，提交后写入、24 h TTL）+ 唯一索引兜底；
+  - Lua 令牌桶（`scripts/token_bucket.lua` + `TokenBucket`，用 Redis `TIME`），接收侧按租户限流，429 + `Retry-After`；重放请求也计数；
+  - HMAC-SHA256 签名（`WebhookSignature`，每次尝试重新签名）+ Java/Python 校验示例（`examples/verify_signature.py`），两边用同一测试向量互校；
+  - SSRF 防护（`SsrfGuard`）：登记与投递前各查一次，按解析后 IP 判断，覆盖十进制/短写 IPv4、IPv4 映射/兼容/NAT64/6to4 IPv6；`relay.ssrf.allowed-hosts` 按字面主机名放行（生产为空，测试只放 127.0.0.1、example.com）。
+- 应做全部完成：投递侧按端点 `deliverQps` 限流、端点熔断（`EndpointGuard`，状态在 Redis，多实例共享）。
+- 验收：`./mvnw verify` 共 80 项通过（新增 SSRF 30、签名 5、接收侧保护 12、投递侧 3、Redis 故障放行 2）。投递与接收保护两组测试连续重复 3 次均通过。
+  - 集成测试覆盖：重复请求（Redis 命中时删库仍返回首次结果，证明不经数据库；缓存未命中回落数据库）、超限 429、租户间限流隔离、签名可被接收方校验、内网地址登记被拒（localhost、127.1、2130706433、10.x、192.168.x、169.254.169.254、[::1]、0.0.0.0）、投递前复查拦截已改指内网的端点、投递侧限流不浪费尝试次数、熔断后停止请求。
+- 真实运行：生产默认配置下登记 `localhost`、`169.254.169.254`、`10.0.0.1` 均返回 `url_not_allowed`；`ingestQps=5` 连发 20 个，13 个 202、7 个 429；Python 接收方用 `examples/verify_signature.py` 校验 14 次投递，全部签名有效。
+- 修正：
+  - 熔断/限流判断原先在拿端点并发许可之前，排队中的任务看不到刚打开的熔断；改为拿到许可后再判断（熔断测试据此只放过 3 次请求）。
+  - Compose 中 Redis 由 `noeviction` 改为 `allkeys-lru` 且不持久化：Redis 只存可丢、带 TTL 的数据，满了应淘汰而不是拒写。
+- 已知局限（面试可讲）：SSRF 检查与 HttpClient 建连之间各自解析 DNS，仍有 rebinding 时间窗；熔断冷却后是“放行全部 + 一次失败即重开”，不是严格的单请求半开；被限流的任务会退回数据库再抢，限流很紧时有额外的数据库写。
+
+## D4 测试与指标 — 未开始
+
+Testcontainers 集成测试补齐、Micrometer 指标（`relay_delivery_total{result}`、`relay_delivery_latency_seconds`、`relay_backlog`、`relay_oldest_pending_seconds`）、模拟接收方 `/sink/{name}`；应做：Grafana 面板（本地 Compose）。另：死信人工重放可提前到 D4（需新迁移）。

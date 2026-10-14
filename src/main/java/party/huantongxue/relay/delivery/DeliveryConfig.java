@@ -5,22 +5,25 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import party.huantongxue.relay.security.SecretCipher;
+import party.huantongxue.relay.ssrf.SsrfGuard;
 
 @Configuration(proxyBeanMethods = false)
 public class DeliveryConfig {
 
     @Bean
-    DeliverySender deliverySender(DeliveryProperties props) {
-        return new DeliverySender(props);
+    DeliverySender deliverySender(DeliveryProperties props, SecretCipher cipher) {
+        return new DeliverySender(props, cipher);
     }
 
     /** relay.delivery.enabled=false 时不创建：实例只负责接收（测试也用这个开关自己控制 worker）。 */
     @Bean
     @ConditionalOnProperty(name = "relay.delivery.enabled", havingValue = "true", matchIfMissing = true)
-    DeliveryWorkerLifecycle deliveryWorkerLifecycle(DeliveryStore store, DeliverySender sender, DeliveryProperties props) {
+    DeliveryWorkerLifecycle deliveryWorkerLifecycle(DeliveryStore store, DeliverySender sender, SsrfGuard ssrf,
+                                                    EndpointGuard guard, DeliveryProperties props) {
         // 实例名只用于日志；默认是 JVM 名（pid@host）
         String name = ManagementFactory.getRuntimeMXBean().getName();
-        return new DeliveryWorkerLifecycle(new DeliveryWorker(name, store, sender, props));
+        return new DeliveryWorkerLifecycle(new DeliveryWorker(name, store, sender, ssrf, guard, props));
     }
 
     /**

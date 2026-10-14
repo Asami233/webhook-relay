@@ -24,11 +24,17 @@ import org.springframework.jdbc.core.JdbcTemplate;
 import party.huantongxue.relay.IntegrationTest;
 import party.huantongxue.relay.endpoint.EndpointService;
 import party.huantongxue.relay.event.EventService;
+import party.huantongxue.relay.security.SecretCipher;
 import party.huantongxue.relay.security.Tokens;
+import party.huantongxue.relay.signature.WebhookSignature;
+import party.huantongxue.relay.ssrf.SsrfGuard;
 import party.huantongxue.relay.tenant.Tenant;
 import party.huantongxue.relay.tenant.TenantMapper;
 
-/** D2 验收：多实例不重复投递；重试、死信、租约过期回收与 fencing、优雅停机。 */
+/**
+ * D2 验收：多实例不重复投递；重试、死信、租约过期回收与 fencing、优雅停机。
+ * D3 验收：签名可被接收方校验；投递前 SSRF 复查；投递侧限流；端点熔断。
+ */
 @IntegrationTest
 class DeliveryEngineIntegrationTest {
 
@@ -44,10 +50,17 @@ class DeliveryEngineIntegrationTest {
     EventService events;
     @Autowired
     DeliveryStore store;
+    @Autowired
+    SsrfGuard ssrf;
+    @Autowired
+    EndpointGuard guard;
+    @Autowired
+    SecretCipher cipher;
 
     private final List<DeliveryWorker> workers = new ArrayList<>();
     private TestReceiver receiver;
     private long tenantId;
+    private String endpointSecret;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -145,6 +158,15 @@ class DeliveryEngineIntegrationTest {
                 + "FROM delivery_attempt WHERE delivery_id = ?", Integer.class, deliveryId)).isLessThan(60);
         String body = receiver.received.getFirst().body();
         assertThat(body).startsWith("{\"id\":").contains("\"type\":\"order.created\"").contains("\"data\":{\"n\": 0}");
+        // 每次尝试的签名都能用创建端点时拿到的 secret 校验通过（接收方视角）
+        long now = Instant.now().getEpochSecond();
+        assertThat(receiver.received).allSatisfy(r -> {
+            assertThat(r.signature()).startsWith("t=");
+            assertThat(WebhookSignature.verify(endpointSecret, r.signature(), r.body(), now,
+                    WebhookSignature.DEFAULT_TOLERANCE)).isTrue();
+            assertThat(WebhookSignature.verify("whsec_wrong", r.signature(), r.body(), now,
+                    WebhookSignature.DEFAULT_TOLERANCE)).isFalse();
+        });
     }
 
     @Test
@@ -251,19 +273,77 @@ class DeliveryEngineIntegrationTest {
         assertThat(countStatus("IN_FLIGHT")).isZero();
     }
 
+
+    @Test
+    void deliveryTimeSsrfCheckBlocksEndpointsThatNowPointInternally() throws Exception {
+        long endpointId = endpoint(receiver.url(), 8);
+        // 模拟登记后被改指内网（DNS rebinding 或绕过 API 写入的旧数据）
+        jdbc.update("UPDATE endpoint SET url = 'http://10.0.0.1/hook' WHERE id = ?", endpointId);
+        ingest(1);
+        worker("A").start();
+        awaitStatus("DEAD", 1, Duration.ofSeconds(20));
+
+        assertThat(receiver.received).isEmpty();
+        assertThat(jdbc.queryForObject("SELECT last_error FROM delivery WHERE tenant_id = ?", String.class, tenantId))
+                .startsWith("blocked by SSRF policy");
+        assertThat(jdbc.queryForObject("SELECT COUNT(*) FROM delivery_attempt da JOIN delivery d "
+                + "ON d.id = da.delivery_id WHERE d.tenant_id = ?", Integer.class, tenantId)).isZero();
+    }
+
+    @Test
+    void deliveryRateLimitSpacesOutRequestsWithoutBurningAttempts() throws Exception {
+        endpoints.create(tenantId, receiver.url(), null, List.of("*"), 8, 2);
+        ingest(10);
+        worker("A").start();
+        awaitStatus("SUCCEEDED", 10, Duration.ofSeconds(30));
+
+        // 桶容量 2、每秒补 2 个：后 8 个至少需要 4 秒，留余量断言 >= 3 秒
+        List<Long> arrivals = receiver.received.stream().map(TestReceiver.Received::receivedAtNanos).sorted().toList();
+        assertThat(Duration.ofNanos(arrivals.getLast() - arrivals.getFirst())).isGreaterThan(Duration.ofSeconds(3));
+        // 被限流退回的任务不计尝试次数
+        assertThat(jdbc.queryForList("SELECT attempts FROM delivery WHERE tenant_id = ?", Integer.class, tenantId))
+                .containsOnly(1);
+    }
+
+    @Test
+    void circuitBreakerStopsHammeringAFailingEndpoint() throws Exception {
+        receiver.respond(arrival -> 500);
+        long endpointId = endpoint(receiver.url(), 20);
+        ingest(5);
+        DeliveryWorker w = worker("A", props(1, 3));
+        w.start();
+
+        await().atMost(Duration.ofSeconds(10)).until(() -> receiver.received.size() >= 3);
+        // 熔断打开后的一段时间内不应再有请求到达
+        Thread.sleep(1500);
+        assertThat(receiver.received).hasSize(3);
+        assertThat(guard.openFor(endpointId)).isNotNull();
+        assertThat(countStatus("DEAD")).isZero();
+    }
+
     // ---- helpers ----
 
     private DeliveryWorker worker(String name) {
-        DeliveryProperties props = new DeliveryProperties(true, Duration.ofMillis(50), 10, 50, 50,
-                Duration.ofSeconds(1), Duration.ofSeconds(3), LEASE, Duration.ofMillis(50), Duration.ofMillis(200),
-                Duration.ofHours(1), Duration.ofSeconds(10));
-        DeliveryWorker w = new DeliveryWorker(name, store, new DeliverySender(props), props);
+        return worker(name, props(50, 1000));
+    }
+
+    private DeliveryWorker worker(String name, DeliveryProperties props) {
+        DeliveryWorker w = new DeliveryWorker(name, store, new DeliverySender(props, cipher), ssrf, guard, props);
         workers.add(w);
         return w;
     }
 
+    private static DeliveryProperties props(int perEndpointConcurrency, int breakerThreshold) {
+        return new DeliveryProperties(true, Duration.ofMillis(50), 10, 50, perEndpointConcurrency,
+                Duration.ofSeconds(1), Duration.ofSeconds(3), LEASE, Duration.ofMillis(50), Duration.ofMillis(200),
+                Duration.ofHours(1), Duration.ofSeconds(10), breakerThreshold, Duration.ofMinutes(1));
+    }
+
+    /** deliverQps 设得很高，避免投递侧限流干扰其他用例。 */
     private long endpoint(String url, int maxAttempts) {
-        return endpoints.create(tenantId, url, null, List.of("*"), maxAttempts, null).endpoint().getId();
+        EndpointService.Created created = endpoints.create(tenantId, url, null, List.of("*"), maxAttempts, 1000);
+        endpointSecret = created.secret();
+        return created.endpoint().getId();
     }
 
     private void ingest(int n) {

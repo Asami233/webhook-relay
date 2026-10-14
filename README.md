@@ -59,3 +59,19 @@ curl -X POST localhost:8080/api/v1/events \
 - **重试**：2xx 成功；网络错误、超时、408、429、5xx 按指数退避 + 抖动重试（尊重 `Retry-After`）；其余 4xx/3xx 直接死信；每次尝试写 `delivery_attempt`（响应体截断 1 KB）。
 - **并发**：虚拟线程执行投递，用信号量限制全局与单端点在途数，而不是靠线程池大小。
 - **至少一次**：每次请求带 `X-Relay-Event-Id`、`X-Relay-Delivery-Id`、`X-Relay-Attempt`，接收方按事件 ID 去重。
+- **幂等快速路径**：事务提交后把结果写入 Redis（24 h）；重复请求在 Redis 命中直接返回，未命中或 Redis 故障回落数据库。正确性只依赖唯一索引。
+- **限流**：Redis + Lua 令牌桶（时间取 Redis `TIME`，多实例共享）。接收侧按租户 `ingestQps`，超限 429 + `Retry-After`；投递侧按端点 `deliverQps`，被限流的任务退回队列且不计尝试次数。Redis 不可用时放行（fail-open）。
+- **熔断**：端点连续可重试失败达到阈值（默认 10 次）后暂停 60 秒；冷却后再失败一次立即重新打开。
+- **SSRF 防护**：登记时与每次投递前都解析域名，任一解析结果落在环回、私网、链路本地（含云元数据 169.254.169.254）、CGNAT、组播、IPv6 ULA 及其 IPv4 嵌入形式即拒绝；不跟随重定向。已知局限：检查与建连之间的 DNS rebinding 窗口（彻底方案是固定已校验 IP 或使用出口代理）。
+
+## 接收方：校验签名
+
+每次投递带 `X-Relay-Signature: t=<unix 秒>,v1=<hex(HMAC-SHA256(secret, "<t>.<原始请求体>"))>`，`secret` 是登记端点时返回的 `whsec_…`。
+
+1. 用**原始请求体字节**计算 HMAC，不要先解析 JSON 再序列化；
+2. 拒绝时间戳与当前时间相差超过 5 分钟的请求（防重放）；
+3. 常量时间比较签名；`v1` 可能有多个，任一匹配即通过；
+4. 投递是至少一次：校验通过后按 `X-Relay-Event-Id` 去重再处理。
+
+- Java：[`WebhookSignature.verify(...)`](src/main/java/party/huantongxue/relay/signature/WebhookSignature.java)（无 Spring 依赖，可直接复制）
+- Python：[`examples/verify_signature.py`](examples/verify_signature.py)（仅标准库；两种实现用同一组测试向量互相校验）
