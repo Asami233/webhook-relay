@@ -1,5 +1,5 @@
 # 本地依赖：MySQL 8.4 + Redis 7。cp .env.example .env 后 docker compose up -d
-# 端口只绑定 127.0.0.1；MySQL 映射到 3307，避免与本机已有 MySQL 冲突。
+# 端口只绑定 127.0.0.1；MySQL 映射到 13306，避免与本机已有 MySQL 冲突。
 name: webhook-relay
 
 services:
@@ -14,8 +14,23 @@ services:
       - --character-set-server=utf8mb4
       - --collation-server=utf8mb4_0900_ai_ci
       - --transaction-isolation=READ-COMMITTED
+      # 按 1 核 1G VPS 的预算配置（见 docs/BENCHMARK.md）：小缓冲池、关闭 performance_schema
+      - --innodb-buffer-pool-size=64M
+      - --performance-schema=OFF
+      # 连接池 20 + 余量；每个连接都有自己的缓冲，连接数直接影响内存
+      - --max-connections=40
+      - --innodb-log-buffer-size=8M
+      # TempTable 默认最多占 1G 内存，小机器上必须收紧
+      - --temptable-max-ram=32M
+      - --tmp-table-size=16M
+      - --max-heap-table-size=16M
+      - --table-open-cache=256
+      - --table-definition-cache=400
+      - --thread-cache-size=8
+    cpus: ${MYSQL_CPUS:-1.0}
+    mem_limit: ${MYSQL_MEM:-384m}
     ports:
-      - "127.0.0.1:${RELAY_DB_PORT:-3307}:3306"
+      - "127.0.0.1:${RELAY_DB_PORT:-13306}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
     healthcheck:
@@ -28,6 +43,7 @@ services:
     image: redis:7-alpine
     # Redis 只存可丢的数据（幂等缓存、限流/熔断状态，均带 TTL）：满了就淘汰最久未用的，而不是拒绝写入
     command: ["redis-server", "--maxmemory", "32mb", "--maxmemory-policy", "allkeys-lru", "--save", "", "--appendonly", "no"]
+    mem_limit: 64m
     ports:
       - "127.0.0.1:${RELAY_REDIS_PORT:-6379}:6379"
     healthcheck:
@@ -35,6 +51,43 @@ services:
       interval: 5s
       timeout: 3s
       retries: 30
+
+  # ---- 可选：容器里运行 Relay 本身（docker compose --profile app up -d --build）----
+  # 先构建 jar：./mvnw -DskipTests package。CPU/内存上限模拟 1 核 1G VPS，压测时也保护本机。
+  app:
+    build: .
+    profiles: [app]
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      RELAY_DB_HOST: mysql
+      RELAY_DB_PORT: "3306"
+      RELAY_DB_NAME: ${RELAY_DB_NAME:-relay}
+      RELAY_DB_USER: ${RELAY_DB_USER:-relay}
+      RELAY_DB_PASSWORD: ${RELAY_DB_PASSWORD}
+      RELAY_REDIS_HOST: redis
+      RELAY_REDIS_PORT: "6379"
+      RELAY_ADMIN_TOKEN: ${RELAY_ADMIN_TOKEN}
+      RELAY_MASTER_KEY: ${RELAY_MASTER_KEY}
+      RELAY_SINK_ENABLED: ${RELAY_SINK_ENABLED:-false}
+      # D5 对比（docs/BENCHMARK.md）：1 核下 Serial 比 G1 延迟更低、CPU 更省；128m 堆 + 限制代码缓存/元空间
+      # 比 160m 堆省约 60 MiB，吞吐不变。实测峰值约 300 MiB，容器上限留约 50 MiB 余量。
+      JAVA_OPTS: ${APP_JAVA_OPTS:--Xmx128m -XX:+UseSerialGC -XX:ReservedCodeCacheSize=48m -XX:MaxMetaspaceSize=128m -XX:+ExitOnOutOfMemoryError}
+      # 压测时覆盖任意 Spring 配置，例如 {"relay":{"delivery":{"batch-size":100}}}
+      SPRING_APPLICATION_JSON: ${APP_SPRING_JSON:-{}}
+    cpus: ${APP_CPUS:-1.0}
+    mem_limit: ${APP_MEM:-352m}
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/actuator/health/readiness | grep -q UP"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+      start_period: 20s
 
   # ---- 可选：本地监控（docker compose --profile monitoring up -d）----
   prometheus:

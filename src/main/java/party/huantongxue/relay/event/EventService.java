@@ -4,12 +4,14 @@ import java.nio.charset.StandardCharsets;
 import java.util.List;
 import java.util.Optional;
 import java.util.regex.Pattern;
+import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.dao.DuplicateKeyException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.support.TransactionTemplate;
 import party.huantongxue.relay.common.ApiException;
 import party.huantongxue.relay.config.RelayProperties;
+import party.huantongxue.relay.delivery.DeliveriesCreated;
 import party.huantongxue.relay.delivery.DeliveryMapper;
 import party.huantongxue.relay.endpoint.Endpoint;
 import party.huantongxue.relay.endpoint.EndpointMapper;
@@ -34,15 +36,18 @@ public class EventService {
     private final DeliveryMapper deliveries;
     private final TransactionTemplate tx;
     private final IdempotencyCache cache;
+    private final ApplicationEventPublisher publisher;
     private final int maxPayloadBytes;
 
     public EventService(EventMapper events, EndpointMapper endpoints, DeliveryMapper deliveries,
-                        TransactionTemplate tx, IdempotencyCache cache, RelayProperties properties) {
+                        TransactionTemplate tx, IdempotencyCache cache, ApplicationEventPublisher publisher,
+                        RelayProperties properties) {
         this.events = events;
         this.endpoints = endpoints;
         this.deliveries = deliveries;
         this.tx = tx;
         this.cache = cache;
+        this.publisher = publisher;
         this.maxPayloadBytes = properties.maxPayloadBytes();
     }
 
@@ -75,9 +80,12 @@ public class EventService {
         } catch (DuplicateKeyException duplicate) {
             result = replay(tenantId, idempotencyKey, requestHash);
         }
-        // 走到这里事务已提交（或读到的是别人已提交的行），可以安全写缓存
+        // 走到这里事务已提交（或读到的是别人已提交的行），可以安全写缓存、通知投递
         cache.put(tenantId, idempotencyKey,
                 new IdempotencyCache.Entry(result.eventId(), result.deliveries(), requestHash));
+        if (!result.replayed() && result.deliveries() > 0) {
+            publisher.publishEvent(new DeliveriesCreated(result.eventId(), result.deliveries()));
+        }
         return result;
     }
 

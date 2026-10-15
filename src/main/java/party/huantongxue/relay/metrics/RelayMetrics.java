@@ -23,7 +23,7 @@ public class RelayMetrics {
 
     public enum Deferred { RATE_LIMITED, CIRCUIT_OPEN, ENDPOINT_BUSY }
 
-    public enum IngestResult { ACCEPTED, REPLAYED, RATE_LIMITED }
+    public enum IngestResult { ACCEPTED, REPLAYED, RATE_LIMITED, OVERLOADED }
 
     /** relay_delivery_total{result} */
     private final Map<DeliveryResult, Counter> deliveries = new EnumMap<>(DeliveryResult.class);

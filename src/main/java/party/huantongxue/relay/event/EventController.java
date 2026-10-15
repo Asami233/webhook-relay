@@ -41,14 +41,16 @@ public class EventController {
     private final DeliveryMapper deliveries;
     private final TokenBucket rateLimiter;
     private final RelayMetrics metrics;
+    private final IngestAdmission admission;
 
     public EventController(EventService service, EventMapper events, DeliveryMapper deliveries,
-                           TokenBucket rateLimiter, RelayMetrics metrics) {
+                           TokenBucket rateLimiter, RelayMetrics metrics, IngestAdmission admission) {
         this.service = service;
         this.events = events;
         this.deliveries = deliveries;
         this.rateLimiter = rateLimiter;
         this.metrics = metrics;
+        this.admission = admission;
     }
 
     public record IngestRequest(@NotBlank String type, @NotNull JsonNode payload) {
@@ -77,24 +79,34 @@ public class EventController {
 
     /**
      * 202：已持久化、尚未投递。重复的 Idempotency-Key 返回首次结果并带 {@value #REPLAYED_HEADER}: true。
-     * 先按租户限流（重放也计数，否则可以用重放请求绕过限流打满接口），再走幂等与写库。
+     * 先过实例并发上限（过载 503），再按租户限流（429；重放也计数，否则可借重放绕过限流），再走幂等与写库。
      */
     @PostMapping
     public ResponseEntity<Accepted> ingest(TenantPrincipal tenant,
                                            @RequestHeader("Idempotency-Key") String idempotencyKey,
                                            @Valid @RequestBody IngestRequest request) {
-        TokenBucket.Result limit = rateLimiter.tryAcquire("relay:rl:ingest:" + tenant.id(),
-                tenant.ingestQps(), tenant.ingestQps());
-        if (!limit.allowed()) {
-            metrics.ingest(RelayMetrics.IngestResult.RATE_LIMITED);
-            throw new RateLimitedException(limit.retryAfter());
+        try {
+            admission.enter();
+        } catch (ApiException overloaded) {
+            metrics.ingest(RelayMetrics.IngestResult.OVERLOADED);
+            throw overloaded;
         }
-        EventService.IngestResult result = service.ingest(tenant.id(), idempotencyKey, request.type(),
-                request.payload().toString());
-        metrics.ingest(result.replayed() ? RelayMetrics.IngestResult.REPLAYED : RelayMetrics.IngestResult.ACCEPTED);
-        return ResponseEntity.status(HttpStatus.ACCEPTED)
-                .header(REPLAYED_HEADER, Boolean.toString(result.replayed()))
-                .body(new Accepted(result.eventId(), result.deliveries()));
+        try {
+            TokenBucket.Result limit = rateLimiter.tryAcquire("relay:rl:ingest:" + tenant.id(),
+                    tenant.ingestQps(), tenant.ingestQps());
+            if (!limit.allowed()) {
+                metrics.ingest(RelayMetrics.IngestResult.RATE_LIMITED);
+                throw new RateLimitedException(limit.delay());
+            }
+            EventService.IngestResult result = service.ingest(tenant.id(), idempotencyKey, request.type(),
+                    request.payload().toString());
+            metrics.ingest(result.replayed() ? RelayMetrics.IngestResult.REPLAYED : RelayMetrics.IngestResult.ACCEPTED);
+            return ResponseEntity.status(HttpStatus.ACCEPTED)
+                    .header(REPLAYED_HEADER, Boolean.toString(result.replayed()))
+                    .body(new Accepted(result.eventId(), result.deliveries()));
+        } finally {
+            admission.exit();
+        }
     }
 
     @GetMapping

@@ -12,15 +12,15 @@ import org.springframework.web.method.support.ModelAndViewContainer;
 import org.springframework.web.servlet.config.annotation.InterceptorRegistry;
 import org.springframework.web.servlet.config.annotation.WebMvcConfigurer;
 import party.huantongxue.relay.config.RelayProperties;
-import party.huantongxue.relay.tenant.TenantMapper;
+import party.huantongxue.relay.tenant.TenantLookup;
 
 @Configuration(proxyBeanMethods = false)
 public class SecurityConfig implements WebMvcConfigurer {
 
     private final RelayProperties properties;
-    private final TenantMapper tenants;
+    private final TenantLookup tenants;
 
-    public SecurityConfig(RelayProperties properties, TenantMapper tenants) {
+    public SecurityConfig(RelayProperties properties, TenantLookup tenants) {
         this.properties = properties;
         this.tenants = tenants;
     }

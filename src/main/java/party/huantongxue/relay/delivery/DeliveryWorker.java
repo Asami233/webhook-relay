@@ -9,13 +9,14 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Semaphore;
+import java.util.concurrent.ThreadLocalRandom;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.random.RandomGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
 import party.huantongxue.relay.metrics.RelayMetrics;
+import party.huantongxue.relay.ratelimit.TokenBucket;
 import party.huantongxue.relay.metrics.RelayMetrics.Deferred;
 import party.huantongxue.relay.metrics.RelayMetrics.DeliveryResult;
 import party.huantongxue.relay.ssrf.SsrfGuard;
@@ -33,6 +34,11 @@ public class DeliveryWorker {
     private static final Logger log = LoggerFactory.getLogger(DeliveryWorker.class);
     private static final int SWEEP_BATCH = 500;
     private static final Duration RELEASE_DELAY = Duration.ofSeconds(1);
+    /**
+     * 被投递侧限流时，等待不超过这个时长就在虚拟线程里原地等（睡眠几乎零成本），超过才退回队列。
+     * D5 压测：deliverQps=20、50 次/秒时，原先每条投递平均被退回约 15 次（每次两次数据库写）。
+     */
+    private static final long MAX_INLINE_RATE_WAIT_MS = 1000;
 
     private final String name;
     private final DeliveryStore store;
@@ -41,13 +47,14 @@ public class DeliveryWorker {
     private final EndpointGuard guard;
     private final RelayMetrics metrics;
     private final DeliveryProperties props;
-    private final RandomGenerator random = RandomGenerator.getDefault();
 
     private final Semaphore inFlight;
     /** 单端点并发许可。端点数量有限（每租户几个到几十个），常驻 Map 的开销可以接受。 */
     private final Map<Long, Semaphore> perEndpoint = new ConcurrentHashMap<>();
     private final ExecutorService executor = Executors.newVirtualThreadPerTaskExecutor();
     private final CountDownLatch stopSignal = new CountDownLatch(1);
+    /** 本实例接收到新事件时被唤醒，不必等满一个轮询周期（多实例时其他实例仍靠轮询）。 */
+    private final Semaphore wakeups = new Semaphore(0);
     private final AtomicLong completed = new AtomicLong();
     private volatile boolean running;
     private Thread loop;
@@ -85,6 +92,7 @@ public class DeliveryWorker {
         }
         running = false;
         stopSignal.countDown();
+        wakeups.release();
         try {
             loop.join(props.shutdownTimeout().toMillis());
             boolean drained = inFlight.tryAcquire(props.maxConcurrency(),
@@ -107,6 +115,13 @@ public class DeliveryWorker {
         return running;
     }
 
+    /** 有新任务入库：空闲中的抢任务循环立即醒来。多次调用只累积一个唤醒。 */
+    public void wakeup() {
+        if (wakeups.availablePermits() == 0) {
+            wakeups.release();
+        }
+    }
+
     /** 本实例已完成（写回了结果）的投递数，测试用来证明多实例都参与了工作。 */
     public long completedCount() {
         return completed.get();
@@ -117,8 +132,8 @@ public class DeliveryWorker {
             try {
                 sweepIfDue();
                 int dispatched = pollOnce();
-                if (dispatched == 0) {
-                    stopSignal.await(props.pollInterval().toMillis(), TimeUnit.MILLISECONDS);
+                if (dispatched == 0 && wakeups.tryAcquire(props.pollInterval().toMillis(), TimeUnit.MILLISECONDS)) {
+                    wakeups.drainPermits();
                 }
             } catch (InterruptedException e) {
                 Thread.currentThread().interrupt();
@@ -196,6 +211,8 @@ public class DeliveryWorker {
                 }
                 return;
             }
+            // 排队等端点许可与原地等限流共用一个截止时间，保证总等待 + 一次请求仍在租约之内
+            long deadline = System.nanoTime() + props.endpointPermitWait().toNanos();
             Semaphore endpointPermits = perEndpoint.computeIfAbsent(d.getEndpointId(),
                     id -> new Semaphore(props.perEndpointConcurrency()));
             if (!endpointPermits.tryAcquire(props.endpointPermitWait().toMillis(), TimeUnit.MILLISECONDS)) {
@@ -212,11 +229,16 @@ public class DeliveryWorker {
                     metrics.deferred(Deferred.CIRCUIT_OPEN);
                     return;
                 }
-                Duration wait = guard.rateLimitWait(d.getEndpointId(), d.getDeliverQps());
-                if (wait != null) {
-                    store.releaseUnattempted(d, wait);
+                long budgetMs = Math.min(MAX_INLINE_RATE_WAIT_MS, (deadline - System.nanoTime()) / 1_000_000);
+                TokenBucket.Result slot = guard.reserveDelivery(d.getEndpointId(), d.getDeliverQps(),
+                        Duration.ofMillis(Math.max(0, budgetMs)));
+                if (!slot.allowed()) {
+                    store.releaseUnattempted(d, slot.delay());
                     metrics.deferred(Deferred.RATE_LIMITED);
                     return;
+                }
+                if (!slot.delay().isZero()) {
+                    Thread.sleep(slot.delay()); // 已预约令牌：睡到轮到自己，不再重抢
                 }
                 handle(d, sender.send(d));
             } finally {
@@ -262,7 +284,7 @@ public class DeliveryWorker {
                 } else {
                     attempt.setError(DeliveryStore.truncate(reason, 512));
                     Duration delay = RetryPolicy.backoff(d.attemptsThisRound(), props.backoffBase(),
-                            props.backoffMax(), r.retryAfter(), random);
+                            props.backoffMax(), r.retryAfter(), ThreadLocalRandom.current());
                     finish(d, store.retry(d, attempt, delay), DeliveryResult.RETRIED);
                 }
             }

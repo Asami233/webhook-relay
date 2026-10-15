@@ -23,13 +23,17 @@ import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.context.event.ApplicationEvents;
+import org.springframework.test.context.event.RecordApplicationEvents;
 import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.test.web.servlet.ResultActions;
 import org.springframework.test.web.servlet.request.MockHttpServletRequestBuilder;
 import party.huantongxue.relay.IntegrationTest;
+import party.huantongxue.relay.delivery.DeliveriesCreated;
 
 /** D1 验收：发事件后库里有 event + delivery；幂等、鉴权、租户隔离、订阅过滤。 */
 @IntegrationTest
+@RecordApplicationEvents
 class IngestIntegrationTest {
 
     private static final String ADMIN = "Bearer test-admin-token-0123456789";
@@ -40,6 +44,8 @@ class IngestIntegrationTest {
     JdbcTemplate jdbc;
     @Autowired
     EventService eventService;
+    @Autowired
+    ApplicationEvents applicationEvents;
 
     private String apiKey;
     private long tenantId;
@@ -80,6 +86,28 @@ class IngestIntegrationTest {
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.payload.orderId").value(42))
                 .andExpect(jsonPath("$.deliveries.length()").value(2));
+    }
+
+    @Test
+    void acceptedEventWakesDeliveryButReplayDoesNot() throws Exception {
+        createEndpoint("[\"*\"]");
+        postEvent("k-wake", "order.created", "{}").andExpect(status().isAccepted());
+        postEvent("k-wake", "order.created", "{}").andExpect(status().isAccepted());
+        // 只有首次（真正入库且有投递任务）发布唤醒事件；重放不发布
+        assertThat(applicationEvents.stream(DeliveriesCreated.class)).hasSize(1);
+    }
+
+    @Test
+    void rotatedApiKeyStopsWorkingImmediatelyDespiteCache() throws Exception {
+        mvc.perform(asTenant(get("/api/v1/endpoints"))).andExpect(status().isOk()); // 进入缓存
+        String body = mvc.perform(post("/api/admin/tenants/" + tenantId + "/rotate-key").header("Authorization", ADMIN))
+                .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+        String oldKey = apiKey;
+        apiKey = JsonPath.read(body, "$.apiKey");
+
+        mvc.perform(get("/api/v1/endpoints").header("Authorization", "Bearer " + oldKey))
+                .andExpect(status().isUnauthorized());
+        mvc.perform(asTenant(get("/api/v1/endpoints"))).andExpect(status().isOk());
     }
 
     @Test

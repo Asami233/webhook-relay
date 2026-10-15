@@ -35,10 +35,13 @@ public class EndpointGuard {
         this.redis = redis;
     }
 
-    /** @return 需要等待的时间；为 null 表示可以立即发送 */
-    public Duration rateLimitWait(long endpointId, int deliverQps) {
-        TokenBucket.Result r = bucket.tryAcquire("relay:rl:deliver:" + endpointId, deliverQps, deliverQps);
-        return r.allowed() ? null : r.retryAfter();
+    /**
+     * 投递侧限流，带预约：等待不超过 maxWait 时直接占下令牌，调用方睡 {@code delay} 后发送。
+     *
+     * @return allowed=true 时 delay 为先要等待的时间；allowed=false 时 delay 为建议多久后再抢
+     */
+    public TokenBucket.Result reserveDelivery(long endpointId, int deliverQps, Duration maxWait) {
+        return bucket.reserve("relay:rl:deliver:" + endpointId, deliverQps, deliverQps, maxWait);
     }
 
     /** @return 熔断剩余时间；为 null 表示熔断关闭 */

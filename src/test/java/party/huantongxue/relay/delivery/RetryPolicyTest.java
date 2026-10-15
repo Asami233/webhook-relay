@@ -3,6 +3,7 @@ package party.huantongxue.relay.delivery;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.time.Duration;
+import java.util.SplittableRandom;
 import java.util.random.RandomGenerator;
 import org.junit.jupiter.api.Test;
 import party.huantongxue.relay.delivery.RetryPolicy.Outcome;
@@ -27,7 +28,7 @@ class RetryPolicyTest {
 
     @Test
     void backoffGrowsExponentiallyWithinJitterBounds() {
-        RandomGenerator random = RandomGenerator.of("L64X128MixRandom");
+        RandomGenerator random = new SplittableRandom(42);
         for (int attempt = 1; attempt <= 6; attempt++) {
             long exp = BASE.toMillis() << (attempt - 1);
             for (int i = 0; i < 200; i++) {
@@ -39,14 +40,14 @@ class RetryPolicyTest {
 
     @Test
     void backoffIsCappedAndNeverOverflows() {
-        RandomGenerator random = RandomGenerator.getDefault();
+        RandomGenerator random = new SplittableRandom(42);
         assertThat(RetryPolicy.backoff(20, BASE, MAX, null, random)).isLessThanOrEqualTo(MAX);
         assertThat(RetryPolicy.backoff(1000, BASE, MAX, null, random)).isLessThanOrEqualTo(MAX).isPositive();
     }
 
     @Test
     void retryAfterExtendsDelayButNotBeyondCap() {
-        RandomGenerator random = RandomGenerator.getDefault();
+        RandomGenerator random = new SplittableRandom(42);
         assertThat(RetryPolicy.backoff(1, BASE, MAX, Duration.ofSeconds(120), random)).isEqualTo(Duration.ofSeconds(120));
         assertThat(RetryPolicy.backoff(1, BASE, MAX, Duration.ofDays(1), random)).isEqualTo(MAX);
         assertThat(RetryPolicy.parseRetryAfter(" 30 ")).isEqualTo(Duration.ofSeconds(30));

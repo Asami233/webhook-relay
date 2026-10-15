@@ -6,7 +6,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.web.servlet.HandlerInterceptor;
 import party.huantongxue.relay.common.ApiException;
 import party.huantongxue.relay.tenant.Tenant;
-import party.huantongxue.relay.tenant.TenantMapper;
+import party.huantongxue.relay.tenant.TenantLookup;
 
 /**
  * 两类鉴权都只认 {@code Authorization: Bearer <token>}。用拦截器而不是 Servlet Filter：
@@ -50,12 +50,12 @@ public final class AuthInterceptors {
         }
     }
 
-    /** {@code /api/v1/**}：租户 API Key，按 SHA-256 查表。 */
+    /** {@code /api/v1/**}：租户 API Key，按 SHA-256 查（带本地缓存，见 {@link TenantLookup}）。 */
     public static final class ApiKey implements HandlerInterceptor {
 
-        private final TenantMapper tenants;
+        private final TenantLookup tenants;
 
-        public ApiKey(TenantMapper tenants) {
+        public ApiKey(TenantLookup tenants) {
             this.tenants = tenants;
         }
 

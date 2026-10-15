@@ -16,8 +16,8 @@ public class ApiExceptionHandler extends ResponseEntityExceptionHandler {
         ProblemDetail body = ProblemDetail.forStatusAndDetail(e.getStatus(), e.getMessage());
         body.setProperty("code", e.getCode());
         ResponseEntity.BodyBuilder response = ResponseEntity.status(e.getStatus());
-        if (e instanceof RateLimitedException limited) {
-            response.header(HttpHeaders.RETRY_AFTER, Long.toString(limited.retryAfterSeconds()));
+        if (e.getRetryAfter() != null) {
+            response.header(HttpHeaders.RETRY_AFTER, Long.toString(e.retryAfterSeconds()));
         }
         return response.body(body);
     }

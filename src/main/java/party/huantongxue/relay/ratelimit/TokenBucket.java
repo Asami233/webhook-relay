@@ -31,24 +31,33 @@ public class TokenBucket {
         this.redis = redis;
     }
 
-    /** @param retryAfter 被拒绝时建议的等待时间；放行时为 {@link Duration#ZERO} */
-    public record Result(boolean allowed, Duration retryAfter) {
+    /**
+     * @param delay 放行时：调用方需要先等待的时间（预约，通常为 0）；拒绝时：建议的重试间隔
+     */
+    public record Result(boolean allowed, Duration delay) {
     }
 
     /**
-     * 取一个令牌。
+     * 取一个令牌，不足即拒绝（接收侧限流用：超限立即 429）。
      *
-     * @param key      桶的 Redis 键
+     * @param key           桶的 Redis 键
      * @param ratePerSecond 每秒补充速率
-     * @param burst    桶容量
+     * @param burst         桶容量
      */
     public Result tryAcquire(String key, double ratePerSecond, int burst) {
+        return reserve(key, ratePerSecond, burst, Duration.ZERO);
+    }
+
+    /**
+     * 取一个令牌；不足但等待不超过 maxWait 时预约成功，返回需要先等多久（投递侧限流用）。
+     */
+    public Result reserve(String key, double ratePerSecond, int burst, Duration maxWait) {
         try {
-            List<?> reply = redis.execute(SCRIPT, List.of(key),
-                    Double.toString(ratePerSecond), Integer.toString(burst), "1");
+            List<?> reply = redis.execute(SCRIPT, List.of(key), Double.toString(ratePerSecond),
+                    Integer.toString(burst), "1", Long.toString(Math.max(0, maxWait.toMillis())));
             boolean allowed = ((Number) reply.get(0)).longValue() == 1;
             long waitMs = ((Number) reply.get(1)).longValue();
-            return new Result(allowed, allowed ? Duration.ZERO : Duration.ofMillis(Math.max(1, waitMs)));
+            return new Result(allowed, allowed ? Duration.ofMillis(waitMs) : Duration.ofMillis(Math.max(1, waitMs)));
         } catch (DataAccessException e) {
             log.warn("rate limiter unavailable, allowing request: {}", e.getMessage());
             return new Result(true, Duration.ZERO);

@@ -24,9 +24,11 @@ import party.huantongxue.relay.security.Tokens;
 public class AdminTenantController {
 
     private final TenantMapper tenants;
+    private final TenantLookup lookup;
 
-    public AdminTenantController(TenantMapper tenants) {
+    public AdminTenantController(TenantMapper tenants, TenantLookup lookup) {
         this.tenants = tenants;
+        this.lookup = lookup;
     }
 
     public record CreateTenant(@NotBlank @Size(max = 100) String name,
@@ -62,10 +64,16 @@ public class AdminTenantController {
 
     @PostMapping("/{id}/rotate-key")
     public TenantWithKey rotateKey(@PathVariable long id) {
+        Tenant current = tenants.findById(id);
+        if (current == null) {
+            throw ApiException.notFound("tenant");
+        }
         String apiKey = Tokens.newApiKey();
         if (tenants.updateApiKey(id, Tokens.sha256Hex(apiKey), Tokens.displayPrefix(apiKey)) == 0) {
             throw ApiException.notFound("tenant");
         }
+        // 本实例立即失效旧 Key；其他实例最多 TenantLookup.TTL 后失效
+        lookup.evict(current.getApiKeyHash());
         return new TenantWithKey(TenantView.of(tenants.findById(id)), apiKey);
     }
 }

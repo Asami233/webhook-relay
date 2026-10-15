@@ -311,6 +311,7 @@ class DeliveryEngineIntegrationTest {
 
     @Test
     void deliveryRateLimitSpacesOutRequestsWithoutBurningAttempts() throws Exception {
+        double deferredBefore = counter("relay.delivery.deferred", "reason", "rate_limited");
         endpoints.create(tenantId, receiver.url(), null, List.of("*"), 8, 2);
         ingest(10);
         worker("A").start();
@@ -322,6 +323,25 @@ class DeliveryEngineIntegrationTest {
         // 被限流退回的任务不计尝试次数
         assertThat(jdbc.queryForList("SELECT attempts FROM delivery WHERE tenant_id = ?", Integer.class, tenantId))
                 .containsOnly(1);
+        // 令牌预约：等待在预算内的直接占令牌、原地睡；超出预算的按精确时间退回一次（含前面排队的令牌），
+        // 不会反复“退回 → 再抢”。本用例预算只有 1 秒（租约 10 秒），2 次/秒时最多预约 2 个，
+        // 其余各退回约一次。D5 前每条投递会被退回十几次。
+        assertThat(counter("relay.delivery.deferred", "reason", "rate_limited") - deferredBefore)
+                .isLessThanOrEqualTo(10);
+    }
+
+    @Test
+    void wakeupDeliversWithoutWaitingForThePollInterval() throws Exception {
+        endpoint(receiver.url(), 8);
+        DeliveryProperties slowPoll = new DeliveryProperties(true, Duration.ofSeconds(30), 10, 50, 50,
+                Duration.ofSeconds(1), Duration.ofSeconds(3), LEASE, Duration.ofMillis(50), Duration.ofMillis(200),
+                Duration.ofHours(1), Duration.ofSeconds(10), 1000, Duration.ofMinutes(1));
+        DeliveryWorker w = worker("A", slowPoll);
+        w.start();
+        Thread.sleep(300); // 让循环进入 30 秒的空闲等待
+        ingest(1);
+        new DeliveryConfig.DeliveryWorkerLifecycle(w).onDeliveriesCreated(new DeliveriesCreated(0, 1));
+        awaitStatus("SUCCEEDED", 1, Duration.ofSeconds(5));
     }
 
     @Test

@@ -5,6 +5,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.context.event.EventListener;
 import party.huantongxue.relay.metrics.RelayMetrics;
 import party.huantongxue.relay.security.SecretCipher;
 import party.huantongxue.relay.ssrf.SsrfGuard;
@@ -53,6 +54,12 @@ public class DeliveryConfig {
         @Override
         public boolean isRunning() {
             return worker.isRunning();
+        }
+
+        /** 本实例接收的事件：直接唤醒投递循环，低负载时端到端延迟不再受轮询间隔影响。 */
+        @EventListener
+        public void onDeliveriesCreated(DeliveriesCreated event) {
+            worker.wakeup();
         }
     }
 }

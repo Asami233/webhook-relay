@@ -14,8 +14,15 @@ Java 21 · Spring Boot 4.1 · MySQL 8.4 · MyBatis · Flyway · Redis 7 · Testc
 
 ```bash
 cp .env.example .env        # 填入随机口令；RELAY_MASTER_KEY 用 openssl rand -base64 32
-docker compose up -d --wait # MySQL(127.0.0.1:3307) + Redis
+docker compose up -d --wait # MySQL(127.0.0.1:13306) + Redis
 ./mvnw spring-boot:run      # http://localhost:8080，启动时 Flyway 自动建表
+```
+
+也可以把 Relay 本身放进容器（CPU/内存上限模拟 1 核 1G VPS，参数依据见 [docs/BENCHMARK.md](docs/BENCHMARK.md)）：
+
+```bash
+./mvnw -DskipTests package
+docker compose --profile app up -d --build --force-recreate --wait
 ```
 
 测试（Testcontainers 自动拉起 MySQL，需要 Docker 在运行）：
@@ -61,6 +68,10 @@ curl -X POST localhost:8080/api/v1/events \
 - 投递相关日志带 `[delivery=… event=…]`。
 - 本地面板：`docker compose --profile monitoring up -d`，Grafana <http://127.0.0.1:3000>（匿名只读，已预置 Webhook Relay 面板），Prometheus <http://127.0.0.1:9091>。
 
+## 性能（1 核容器，详见 [docs/BENCHMARK.md](docs/BENCHMARK.md)）
+
+接收 600 次/秒时 P99 48 ms；过载时超出部分立即 503（不雪崩）；应用内存约 300 MiB（`-Xmx128m` Serial）。调优过程：连接池瓶颈定位（等待 662 ms vs 占用 12 ms）、过载时 GC 雪崩、投递侧限流的惊群与令牌预约、单核下 Serial vs G1。
+
 ## 设计要点（已实现部分）
 
 - **事务外箱**：`event` 与扇出的 `delivery` 在同一事务写入；返回 202 即代表投递任务已持久化。
@@ -73,7 +84,8 @@ curl -X POST localhost:8080/api/v1/events \
 - **并发**：虚拟线程执行投递，用信号量限制全局与单端点在途数，而不是靠线程池大小。
 - **至少一次**：每次请求带 `X-Relay-Event-Id`、`X-Relay-Delivery-Id`、`X-Relay-Attempt`，接收方按事件 ID 去重。
 - **幂等快速路径**：事务提交后把结果写入 Redis（24 h）；重复请求在 Redis 命中直接返回，未命中或 Redis 故障回落数据库。正确性只依赖唯一索引。
-- **限流**：Redis + Lua 令牌桶（时间取 Redis `TIME`，多实例共享）。接收侧按租户 `ingestQps`，超限 429 + `Retry-After`；投递侧按端点 `deliverQps`，被限流的任务退回队列且不计尝试次数。Redis 不可用时放行（fail-open）。
+- **限流**：Redis + Lua 令牌桶（时间取 Redis `TIME`，多实例共享）。接收侧按租户 `ingestQps`，超限 429 + `Retry-After`；投递侧按端点 `deliverQps`，等待 ≤ 1 秒时**预约令牌**原地等（避免等待者同时醒来再抢的惊群），更久才退回队列且不计尝试次数。Redis 不可用时放行（fail-open）。
+- **过载保护**：接收接口并发上限（默认 64），超出立即 503 + `Retry-After`，防止排队撑满堆、GC 停顿拉长连接占用导致雪崩。
 - **熔断**：端点连续可重试失败达到阈值（默认 10 次）后暂停 60 秒；冷却后再失败一次立即重新打开。
 - **SSRF 防护**：登记时与每次投递前都解析域名，任一解析结果落在环回、私网、链路本地（含云元数据 169.254.169.254）、CGNAT、组播、IPv6 ULA 及其 IPv4 嵌入形式即拒绝；不跟随重定向。已知局限：检查与建连之间的 DNS rebinding 窗口（彻底方案是固定已校验 IP 或使用出口代理）。
 
