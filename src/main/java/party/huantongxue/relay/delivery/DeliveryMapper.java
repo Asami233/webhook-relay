@@ -42,4 +42,24 @@ public interface DeliveryMapper {
 
     /** 把租约过期的 IN_FLIGHT 退回 PENDING（实例崩溃、停机超时）。 */
     int sweepExpiredLeases(int limit);
+
+    // ---- 查询与人工重放 ----
+
+    Delivery findById(@Param("tenantId") long tenantId, @Param("id") long id);
+
+    /** 键集分页；status、beforeId 可为 null。 */
+    List<Delivery> findPage(@Param("tenantId") long tenantId, @Param("status") DeliveryStatus status,
+                            @Param("beforeId") Long beforeId, @Param("limit") int limit);
+
+    List<DeliveryAttempt> findAttempts(long deliveryId);
+
+    int replay(@Param("tenantId") long tenantId, @Param("id") long id);
+
+    int replayDeadForEndpoint(@Param("tenantId") long tenantId, @Param("endpointId") long endpointId);
+
+    // ---- 指标 ----
+
+    BacklogStats backlogStats();
+
+    List<StatusCount> countOpenByStatus();
 }

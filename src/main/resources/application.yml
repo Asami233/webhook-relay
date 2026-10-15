@@ -42,13 +42,29 @@ relay:
   ssrf:
     # 跳过 SSRF 检查的主机（按 URL 里的字面主机名精确匹配）。生产保持为空。
     allowed-hosts: []
+  sink:
+    # 内置模拟接收方 /sink/{id}（演示用）。开启后 SSRF 只放行 <base-url>/sink/ 这一个路径前缀。
+    enabled: ${RELAY_SINK_ENABLED:false}
+    base-url: ${RELAY_SINK_BASE_URL:http://127.0.0.1:${server.port:8080}}
 
 management:
   endpoints:
     web:
       exposure:
-        include: health,info
+        include: health,info,prometheus
   endpoint:
     health:
       probes:
         enabled: true
+      group:
+        # 就绪要求数据库可用；Redis 故障时接口 fail-open 仍可服务，不纳入就绪判断
+        readiness:
+          include: readinessState,db
+  metrics:
+    tags:
+      application: ${spring.application.name}
+
+logging:
+  pattern:
+    # 投递日志带上 delivery_id / event_id（来自 MDC）；不在投递线程里时这段为空
+    level: '%5p%replace( [delivery=%X{delivery_id} event=%X{event_id}]){'' \[delivery= event=\]'', ''''}'

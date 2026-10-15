@@ -2,6 +2,10 @@ package party.huantongxue.relay.delivery;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.awaitility.Awaitility.await;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.Duration;
 import java.time.Instant;
@@ -16,14 +20,18 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.stream.Collectors;
+import io.micrometer.core.instrument.MeterRegistry;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.test.web.servlet.MockMvc;
 import party.huantongxue.relay.IntegrationTest;
 import party.huantongxue.relay.endpoint.EndpointService;
 import party.huantongxue.relay.event.EventService;
+import party.huantongxue.relay.metrics.BacklogMetricsRefresher;
+import party.huantongxue.relay.metrics.RelayMetrics;
 import party.huantongxue.relay.security.SecretCipher;
 import party.huantongxue.relay.security.Tokens;
 import party.huantongxue.relay.signature.WebhookSignature;
@@ -56,10 +64,20 @@ class DeliveryEngineIntegrationTest {
     EndpointGuard guard;
     @Autowired
     SecretCipher cipher;
+    @Autowired
+    RelayMetrics metrics;
 
     private final List<DeliveryWorker> workers = new ArrayList<>();
+    @Autowired
+    MockMvc mvc;
+    @Autowired
+    MeterRegistry registry;
+    @Autowired
+    BacklogMetricsRefresher backlogRefresher;
+
     private TestReceiver receiver;
     private long tenantId;
+    private String apiKey;
     private String endpointSecret;
 
     @BeforeEach
@@ -70,8 +88,9 @@ class DeliveryEngineIntegrationTest {
         receiver = new TestReceiver();
         Tenant t = new Tenant();
         t.setName("delivery-" + UUID.randomUUID());
-        t.setApiKeyHash(Tokens.sha256Hex(UUID.randomUUID().toString()));
-        t.setApiKeyPrefix("rk_test");
+        apiKey = Tokens.newApiKey();
+        t.setApiKeyHash(Tokens.sha256Hex(apiKey));
+        t.setApiKeyPrefix(Tokens.displayPrefix(apiKey));
         t.setIngestQps(1000);
         tenants.insert(t);
         tenantId = t.getId();
@@ -321,6 +340,91 @@ class DeliveryEngineIntegrationTest {
         assertThat(countStatus("DEAD")).isZero();
     }
 
+    @Test
+    void deadLetterReplayGetsFreshBudgetAndKeepsAttemptHistory() throws Exception {
+        receiver.respond(arrival -> 500);
+        long endpointId = endpoint(receiver.url(), 2);
+        ingest(1);
+        worker("A").start();
+        awaitStatus("DEAD", 1, Duration.ofSeconds(20));
+        long deliveryId = onlyDeliveryId();
+
+        // 接收方仍未修好：重放后本轮再给 2 次机会，总尝试 4 次，再次死信
+        mvc.perform(post("/api/v1/deliveries/" + deliveryId + "/replay").header("Authorization", "Bearer " + apiKey))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("PENDING"))
+                .andExpect(jsonPath("$.replayCount").value(1));
+        await().atMost(Duration.ofSeconds(20)).until(() ->
+                jdbc.queryForObject("SELECT attempts FROM delivery WHERE id = ?", Integer.class, deliveryId) == 4
+                        && countStatus("DEAD") == 1);
+
+        // 修好接收方后按端点批量重放
+        receiver.respond(arrival -> 200);
+        mvc.perform(post("/api/v1/endpoints/" + endpointId + "/replay-dead").header("Authorization", "Bearer " + apiKey))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.replayed").value(1));
+        awaitStatus("SUCCEEDED", 1, Duration.ofSeconds(20));
+
+        assertThat(jdbc.queryForList("SELECT attempt_no FROM delivery_attempt WHERE delivery_id = ? ORDER BY attempt_no",
+                Integer.class, deliveryId)).containsExactly(1, 2, 3, 4, 5);
+        mvc.perform(get("/api/v1/deliveries/" + deliveryId).header("Authorization", "Bearer " + apiKey))
+                .andExpect(jsonPath("$.delivery.replayCount").value(2))
+                .andExpect(jsonPath("$.attempts.length()").value(5))
+                .andExpect(jsonPath("$.attempts[4].statusCode").value(200));
+        // 非死信不能重放
+        mvc.perform(post("/api/v1/deliveries/" + deliveryId + "/replay").header("Authorization", "Bearer " + apiKey))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("not_dead"));
+    }
+
+    @Test
+    void replayIsRejectedWhileEndpointIsDisabled() throws Exception {
+        long endpointId = endpoint(receiver.url(), 8);
+        ingest(1);
+        endpoints.update(tenantId, endpointId, null, null, null, false, null, null);
+        worker("A").start();
+        awaitStatus("DEAD", 1, Duration.ofSeconds(20));
+
+        mvc.perform(post("/api/v1/deliveries/" + onlyDeliveryId() + "/replay").header("Authorization", "Bearer " + apiKey))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.code").value("endpoint_disabled"));
+        mvc.perform(get("/api/v1/deliveries?status=DEAD").header("Authorization", "Bearer " + apiKey))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.length()").value(1));
+    }
+
+    @Test
+    void metricsTrackOutcomesLatencyAndBacklog() throws Exception {
+        double succeeded = counter("relay.delivery", "result", "succeeded");
+        double retried = counter("relay.delivery", "result", "retried");
+        long endToEnd = registry.get("relay.delivery.latency").timer().count();
+        long attemptsOk = registry.get("relay.delivery.attempt").tag("outcome", "success").timer().count();
+        long attemptsFailed = registry.get("relay.delivery.attempt").tag("outcome", "failure").timer().count();
+
+        receiver.respond(arrival -> arrival < 3 ? 503 : 200);
+        endpoint(receiver.url(), 8);
+        ingest(1);
+        DeliveryWorker w = worker("A");
+        w.start();
+        awaitStatus("SUCCEEDED", 1, Duration.ofSeconds(20));
+        w.stop();
+
+        assertThat(counter("relay.delivery", "result", "succeeded") - succeeded).isEqualTo(1);
+        assertThat(counter("relay.delivery", "result", "retried") - retried).isEqualTo(2);
+        assertThat(registry.get("relay.delivery.latency").timer().count() - endToEnd).isEqualTo(1);
+        assertThat(registry.get("relay.delivery.attempt").tag("outcome", "success").timer().count() - attemptsOk)
+                .isEqualTo(1);
+        assertThat(registry.get("relay.delivery.attempt").tag("outcome", "failure").timer().count() - attemptsFailed)
+                .isEqualTo(2);
+
+        // 积压：没有 worker 时 3 个到期任务（setUp 已把其他用例的未完成任务清掉）
+        ingestMore(3);
+        backlogRefresher.refresh();
+        assertThat(registry.get("relay.backlog").gauge().value()).isEqualTo(3);
+        assertThat(registry.get("relay.oldest.pending").gauge().value()).isGreaterThanOrEqualTo(0);
+        assertThat(registry.get("relay.deliveries").tag("status", "pending").gauge().value()).isEqualTo(3);
+    }
+
     // ---- helpers ----
 
     private DeliveryWorker worker(String name) {
@@ -328,7 +432,7 @@ class DeliveryEngineIntegrationTest {
     }
 
     private DeliveryWorker worker(String name, DeliveryProperties props) {
-        DeliveryWorker w = new DeliveryWorker(name, store, new DeliverySender(props, cipher), ssrf, guard, props);
+        DeliveryWorker w = new DeliveryWorker(name, store, new DeliverySender(props, cipher), ssrf, guard, metrics, props);
         workers.add(w);
         return w;
     }
@@ -350,6 +454,17 @@ class DeliveryEngineIntegrationTest {
         for (int i = 0; i < n; i++) {
             events.ingest(tenantId, "k-" + i, "order.created", "{\"n\": " + i + "}");
         }
+    }
+
+    /** 与 ingest() 的幂等键不重叠。 */
+    private void ingestMore(int n) {
+        for (int i = 0; i < n; i++) {
+            events.ingest(tenantId, "more-" + i, "order.created", "{\"m\": " + i + "}");
+        }
+    }
+
+    private double counter(String name, String tag, String value) {
+        return registry.get(name).tag(tag, value).counter().count();
     }
 
     private void awaitStatus(String status, int expected, Duration timeout) {

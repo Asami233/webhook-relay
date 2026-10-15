@@ -39,6 +39,11 @@ docker compose up -d --wait # MySQL(127.0.0.1:3307) + Redis
 | POST | `/api/v1/events` | API Key + `Idempotency-Key` 头 | 接收事件，返回 202；重复键返回首次结果并带 `Idempotent-Replayed: true`；同键不同内容 422 |
 | GET | `/api/v1/events?before=&limit=` | API Key | 事件列表（键集分页） |
 | GET | `/api/v1/events/{id}` | API Key | 事件详情与各端点投递状态 |
+| GET | `/api/v1/deliveries?status=&before=&limit=` | API Key | 投递列表（如 `status=DEAD` 查死信） |
+| GET | `/api/v1/deliveries/{id}` | API Key | 投递详情与每次尝试（状态码、耗时、错误、响应前 1 KB） |
+| POST | `/api/v1/deliveries/{id}/replay` | API Key | 死信重放：本轮重新获得 `maxAttempts` 次机会，尝试历史保留 |
+| POST | `/api/v1/endpoints/{id}/replay-dead` | API Key | 接收方修好后批量重放该端点全部死信 |
+| POST / GET / PUT / DELETE | `/api/v1/sinks[/{id}[/config]]` | API Key | 模拟接收方（需 `RELAY_SINK_ENABLED=true`）：失败率、失败状态码、延迟；统计重复投递 |
 
 ```bash
 curl -X POST localhost:8080/api/v1/events \
@@ -47,6 +52,14 @@ curl -X POST localhost:8080/api/v1/events \
   -d '{"type":"order.created","payload":{"orderId":1001}}'
 # 202 {"eventId":1,"deliveries":1}
 ```
+
+## 可观测性
+
+- `GET /actuator/prometheus`：`relay_delivery_total{result}`、`relay_delivery_latency_seconds`（事件创建 → 成功送达，直方图）、`relay_delivery_attempt_seconds{outcome}`（单次 HTTP）、`relay_backlog`、`relay_oldest_pending_seconds`、`relay_deliveries{status}`、`relay_delivery_deferred_total{reason}`、`relay_ingest_total{result}`。标签只用低基数类别，不按租户/端点打标签。
+- 积压类指标由定时任务每 5 秒查库刷新，抓取只读内存值。
+- `/actuator/health/liveness`、`/actuator/health/readiness`（就绪要求数据库可用；Redis 故障时 fail-open，不影响就绪）。
+- 投递相关日志带 `[delivery=… event=…]`。
+- 本地面板：`docker compose --profile monitoring up -d`，Grafana <http://127.0.0.1:3000>（匿名只读，已预置 Webhook Relay 面板），Prometheus <http://127.0.0.1:9091>。
 
 ## 设计要点（已实现部分）
 

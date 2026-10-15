@@ -24,6 +24,7 @@ import party.huantongxue.relay.common.RateLimitedException;
 import party.huantongxue.relay.delivery.Delivery;
 import party.huantongxue.relay.delivery.DeliveryMapper;
 import party.huantongxue.relay.delivery.DeliveryStatus;
+import party.huantongxue.relay.metrics.RelayMetrics;
 import party.huantongxue.relay.ratelimit.TokenBucket;
 import party.huantongxue.relay.security.TenantPrincipal;
 import tools.jackson.databind.JsonNode;
@@ -39,13 +40,15 @@ public class EventController {
     private final EventMapper events;
     private final DeliveryMapper deliveries;
     private final TokenBucket rateLimiter;
+    private final RelayMetrics metrics;
 
     public EventController(EventService service, EventMapper events, DeliveryMapper deliveries,
-                           TokenBucket rateLimiter) {
+                           TokenBucket rateLimiter, RelayMetrics metrics) {
         this.service = service;
         this.events = events;
         this.deliveries = deliveries;
         this.rateLimiter = rateLimiter;
+        this.metrics = metrics;
     }
 
     public record IngestRequest(@NotBlank String type, @NotNull JsonNode payload) {
@@ -83,10 +86,12 @@ public class EventController {
         TokenBucket.Result limit = rateLimiter.tryAcquire("relay:rl:ingest:" + tenant.id(),
                 tenant.ingestQps(), tenant.ingestQps());
         if (!limit.allowed()) {
+            metrics.ingest(RelayMetrics.IngestResult.RATE_LIMITED);
             throw new RateLimitedException(limit.retryAfter());
         }
         EventService.IngestResult result = service.ingest(tenant.id(), idempotencyKey, request.type(),
                 request.payload().toString());
+        metrics.ingest(result.replayed() ? RelayMetrics.IngestResult.REPLAYED : RelayMetrics.IngestResult.ACCEPTED);
         return ResponseEntity.status(HttpStatus.ACCEPTED)
                 .header(REPLAYED_HEADER, Boolean.toString(result.replayed()))
                 .body(new Accepted(result.eventId(), result.deliveries()));

@@ -3,8 +3,8 @@
 <mapper namespace="party.huantongxue.relay.delivery.DeliveryMapper">
 
     <sql id="columns">
-        id, tenant_id, event_id, endpoint_id, status, attempts, next_attempt_at, lease_until,
-        last_status_code, last_error, created_at, updated_at
+        id, tenant_id, event_id, endpoint_id, status, attempts, attempts_base, replay_count,
+        next_attempt_at, lease_until, last_status_code, last_error, created_at, updated_at
     </sql>
 
     <!-- 一条多行 INSERT，与 event 写入在同一事务（事务外箱） -->
@@ -47,7 +47,7 @@
     </update>
 
     <select id="findClaimed" resultType="party.huantongxue.relay.delivery.ClaimedDelivery">
-        SELECT d.id, d.tenant_id, d.event_id, d.endpoint_id, d.attempts,
+        SELECT d.id, d.tenant_id, d.event_id, d.endpoint_id, d.attempts, d.attempts_base,
                e.type AS event_type, e.payload, e.created_at AS event_created_at,
                ep.url, ep.secret_ciphertext, ep.enabled AS endpoint_enabled,
                (ep.deleted_at IS NOT NULL) AS endpoint_deleted, ep.max_attempts, ep.deliver_qps
@@ -89,6 +89,63 @@
             next_attempt_at = DATE_ADD(NOW(3), INTERVAL #{delayMs} * 1000 MICROSECOND)
         WHERE id = #{id} AND status = 'IN_FLIGHT' AND attempts = #{attempts}
     </update>
+
+    <!-- ==== 查询与人工重放（控制台 / API） ==== -->
+
+    <select id="findById" resultType="party.huantongxue.relay.delivery.Delivery">
+        SELECT <include refid="columns"/> FROM delivery WHERE id = #{id} AND tenant_id = #{tenantId}
+    </select>
+
+    <!-- 走 idx_delivery_tenant_status(tenant_id, status, id) 或 idx_delivery_tenant(tenant_id, id) -->
+    <select id="findPage" resultType="party.huantongxue.relay.delivery.Delivery">
+        SELECT <include refid="columns"/> FROM delivery
+        WHERE tenant_id = #{tenantId}
+        <if test="status != null">AND status = #{status}</if>
+        <if test="beforeId != null">AND id &lt; #{beforeId}</if>
+        ORDER BY id DESC
+        LIMIT #{limit}
+    </select>
+
+    <select id="findAttempts" resultType="party.huantongxue.relay.delivery.DeliveryAttempt">
+        SELECT id, delivery_id, attempt_no, started_at, duration_ms, status_code, error, response_snippet
+        FROM delivery_attempt WHERE delivery_id = #{deliveryId} ORDER BY attempt_no
+    </select>
+
+    <!--
+      DEAD → PENDING。attempts 不清零（attempt_no 唯一、历史完整），把基数推到当前 attempts，
+      本轮重新获得 max_attempts 次机会。端点已停用/删除则不重放（会立刻再次死信）。
+    -->
+    <update id="replay">
+        UPDATE delivery d JOIN endpoint ep ON ep.id = d.endpoint_id
+        SET d.status = 'PENDING', d.attempts_base = d.attempts, d.replay_count = d.replay_count + 1,
+            d.next_attempt_at = NOW(3), d.last_error = NULL
+        WHERE d.id = #{id} AND d.tenant_id = #{tenantId} AND d.status = 'DEAD'
+          AND ep.enabled = 1 AND ep.deleted_at IS NULL
+    </update>
+
+    <update id="replayDeadForEndpoint">
+        UPDATE delivery d JOIN endpoint ep ON ep.id = d.endpoint_id
+        SET d.status = 'PENDING', d.attempts_base = d.attempts, d.replay_count = d.replay_count + 1,
+            d.next_attempt_at = NOW(3), d.last_error = NULL
+        WHERE d.endpoint_id = #{endpointId} AND d.tenant_id = #{tenantId} AND d.status = 'DEAD'
+          AND ep.enabled = 1 AND ep.deleted_at IS NULL
+    </update>
+
+    <!-- ==== 指标（全局，走 idx_delivery_claim） ==== -->
+
+    <select id="backlogStats" resultType="party.huantongxue.relay.delivery.BacklogStats">
+        SELECT COUNT(*) AS due,
+               COALESCE(TIMESTAMPDIFF(MICROSECOND, MIN(next_attempt_at), NOW(3)) / 1000000, 0) AS oldest_due_seconds
+        FROM delivery
+        WHERE status = 'PENDING' AND next_attempt_at &lt;= NOW(3)
+    </select>
+
+    <!-- SUCCEEDED 只增不减且量最大，不统计 -->
+    <select id="countOpenByStatus" resultType="party.huantongxue.relay.delivery.StatusCount">
+        SELECT status, COUNT(*) AS n FROM delivery
+        WHERE status IN ('PENDING', 'IN_FLIGHT', 'DEAD')
+        GROUP BY status
+    </select>
 
     <!-- 走 idx_delivery_lease(status, lease_until)；attempts 不回退：崩溃前那次可能已送达，计入次数 -->
     <update id="sweepExpiredLeases">

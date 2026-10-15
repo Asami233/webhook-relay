@@ -7,9 +7,11 @@ import java.net.URI;
 import java.net.UnknownHostException;
 import java.util.Locale;
 import java.util.Set;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import party.huantongxue.relay.sink.SinkProperties;
 
 /**
  * SSRF 防护：端点 URL 由租户填写，不能让 Relay 替攻击者访问内网、本机或云元数据服务。
@@ -44,21 +46,36 @@ public class SsrfGuard {
         }
     }
 
+    private static final Pattern SINK_ID = Pattern.compile("[A-Za-z0-9_-]{1,64}");
+
     private final Set<String> allowedHosts;
+    private final String sinkPrefix;
     private final Resolver resolver;
 
     @Autowired
-    public SsrfGuard(SsrfProperties properties) {
-        this(properties, InetAddress::getAllByName);
+    public SsrfGuard(SsrfProperties properties, SinkProperties sink) {
+        this(properties, sink.receivePrefix(), InetAddress::getAllByName);
     }
 
     public SsrfGuard(SsrfProperties properties, Resolver resolver) {
+        this(properties, null, resolver);
+    }
+
+    /**
+     * @param sinkPrefix 内置模拟接收方的地址前缀（如 {@code http://127.0.0.1:8080/sink/}），为 null 表示未开启。
+     *                   只放行“前缀 + 一个 ID”这一种形状，不是放行整个主机。
+     */
+    public SsrfGuard(SsrfProperties properties, String sinkPrefix, Resolver resolver) {
         this.allowedHosts = properties.allowedHosts().stream()
                 .map(h -> h.toLowerCase(Locale.ROOT)).collect(Collectors.toUnmodifiableSet());
+        this.sinkPrefix = sinkPrefix;
         this.resolver = resolver;
     }
 
     public Decision check(String url) {
+        if (isSinkUrl(url)) {
+            return Decision.allow();
+        }
         String host = URI.create(url).getHost();
         if (host == null) {
             return Decision.block("url has no host");
@@ -80,6 +97,17 @@ public class SsrfGuard {
             }
         }
         return Decision.allow();
+    }
+
+    /**
+     * 严格匹配“前缀 + ID”，不允许多余路径、查询串或编码字符：
+     * {@code /sink/../actuator}、{@code /sink/%2e%2e/x} 之类都不算，仍走正常的 IP 检查（并被拒绝）。
+     */
+    private boolean isSinkUrl(String url) {
+        if (sinkPrefix == null || !url.startsWith(sinkPrefix)) {
+            return false;
+        }
+        return SINK_ID.matcher(url.substring(sinkPrefix.length())).matches();
     }
 
     static boolean isForbidden(InetAddress a) {

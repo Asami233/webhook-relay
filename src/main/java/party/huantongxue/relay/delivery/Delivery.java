@@ -13,6 +13,9 @@ public class Delivery {
     private long endpointId;
     private DeliveryStatus status;
     private int attempts;
+    /** 最近一次人工重放时的 attempts；本轮已用次数 = attempts - attemptsBase。 */
+    private int attemptsBase;
+    private int replayCount;
     private Instant nextAttemptAt;
     private Instant leaseUntil;
     private Integer lastStatusCode;

@@ -70,6 +70,18 @@ class SsrfGuardTest {
     }
 
     @Test
+    void sinkPrefixAllowsOnlyPrefixPlusId() {
+        SsrfGuard withSink = new SsrfGuard(new SsrfProperties(List.of()), "http://127.0.0.1:8080/sink/", LITERAL_ONLY);
+        assertThat(withSink.check("http://127.0.0.1:8080/sink/AbC-123_x").allowed()).isTrue();
+        // 同主机其他路径、路径穿越、编码穿越、查询串、其他端口：都不在放行形状内，按 IP 检查被拒
+        for (String url : List.of("http://127.0.0.1:8080/actuator/prometheus", "http://127.0.0.1:8080/sink/../actuator",
+                "http://127.0.0.1:8080/sink/%2e%2e/actuator", "http://127.0.0.1:8080/sink/a/b",
+                "http://127.0.0.1:8080/sink/a?x=1", "http://127.0.0.1:8080/sink/", "http://127.0.0.1:9000/sink/a")) {
+            assertThat(withSink.check(url).allowed()).as(url).isFalse();
+        }
+    }
+
+    @Test
     void allowListMatchesLiteralHostOnly() {
         SsrfGuard allowLoopbackIp = new SsrfGuard(new SsrfProperties(List.of("127.0.0.1")), LITERAL_ONLY);
         assertThat(allowLoopbackIp.check("http://127.0.0.1:9000/hook").allowed()).isTrue();

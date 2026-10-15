@@ -5,6 +5,7 @@ import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import party.huantongxue.relay.metrics.RelayMetrics;
 import party.huantongxue.relay.security.SecretCipher;
 import party.huantongxue.relay.ssrf.SsrfGuard;
 
@@ -20,10 +21,11 @@ public class DeliveryConfig {
     @Bean
     @ConditionalOnProperty(name = "relay.delivery.enabled", havingValue = "true", matchIfMissing = true)
     DeliveryWorkerLifecycle deliveryWorkerLifecycle(DeliveryStore store, DeliverySender sender, SsrfGuard ssrf,
-                                                    EndpointGuard guard, DeliveryProperties props) {
+                                                    EndpointGuard guard, RelayMetrics metrics,
+                                                    DeliveryProperties props) {
         // 实例名只用于日志；默认是 JVM 名（pid@host）
         String name = ManagementFactory.getRuntimeMXBean().getName();
-        return new DeliveryWorkerLifecycle(new DeliveryWorker(name, store, sender, ssrf, guard, props));
+        return new DeliveryWorkerLifecycle(new DeliveryWorker(name, store, sender, ssrf, guard, metrics, props));
     }
 
     /**

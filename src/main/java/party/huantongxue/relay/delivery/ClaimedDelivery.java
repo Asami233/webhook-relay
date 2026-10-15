@@ -14,6 +14,8 @@ public class ClaimedDelivery {
     private long endpointId;
     /** 抢任务时已 +1：既是本次尝试序号，也是回写结果时的 fencing token。 */
     private int attempts;
+    /** 本轮已用次数 = attempts - attemptsBase（人工重放会把基数推到当时的 attempts）。 */
+    private int attemptsBase;
     private String eventType;
     private String payload;
     private Instant eventCreatedAt;
@@ -23,4 +25,9 @@ public class ClaimedDelivery {
     private boolean endpointDeleted;
     private int maxAttempts;
     private int deliverQps;
+
+    /** 本轮（自创建或最近一次重放以来）已用的尝试次数，含当前这次。 */
+    public int attemptsThisRound() {
+        return attempts - attemptsBase;
+    }
 }

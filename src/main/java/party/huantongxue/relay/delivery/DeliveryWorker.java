@@ -1,6 +1,7 @@
 package party.huantongxue.relay.delivery;
 
 import java.time.Duration;
+import java.time.Instant;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
@@ -14,6 +15,9 @@ import java.util.random.RandomGenerator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.slf4j.MDC;
+import party.huantongxue.relay.metrics.RelayMetrics;
+import party.huantongxue.relay.metrics.RelayMetrics.Deferred;
+import party.huantongxue.relay.metrics.RelayMetrics.DeliveryResult;
 import party.huantongxue.relay.ssrf.SsrfGuard;
 
 /**
@@ -35,6 +39,7 @@ public class DeliveryWorker {
     private final DeliverySender sender;
     private final SsrfGuard ssrf;
     private final EndpointGuard guard;
+    private final RelayMetrics metrics;
     private final DeliveryProperties props;
     private final RandomGenerator random = RandomGenerator.getDefault();
 
@@ -49,12 +54,13 @@ public class DeliveryWorker {
     private long lastSweepNanos;
 
     public DeliveryWorker(String name, DeliveryStore store, DeliverySender sender, SsrfGuard ssrf,
-                          EndpointGuard guard, DeliveryProperties props) {
+                          EndpointGuard guard, RelayMetrics metrics, DeliveryProperties props) {
         this.name = name;
         this.store = store;
         this.sender = sender;
         this.ssrf = ssrf;
         this.guard = guard;
+        this.metrics = metrics;
         this.props = props;
         this.inFlight = new Semaphore(props.maxConcurrency());
     }
@@ -170,12 +176,14 @@ public class DeliveryWorker {
         MDC.put("event_id", Long.toString(d.getEventId()));
         try {
             if (d.isEndpointDeleted() || !d.isEndpointEnabled()) {
-                finish(d, store.dead(d, null, d.isEndpointDeleted() ? "endpoint deleted" : "endpoint disabled"));
+                finish(d, store.dead(d, null, d.isEndpointDeleted() ? "endpoint deleted" : "endpoint disabled"),
+                        DeliveryResult.DEAD);
                 return;
             }
-            if (d.getAttempts() > d.getMaxAttempts()) {
+            if (d.attemptsThisRound() > d.getMaxAttempts()) {
                 // 只会出现在“租约过期被清扫”之后：那次尝试可能已送达，已计入次数
-                finish(d, store.dead(d, null, "attempts exhausted (lease expired on last attempt)"));
+                finish(d, store.dead(d, null, "attempts exhausted (lease expired on last attempt)"),
+                        DeliveryResult.DEAD);
                 return;
             }
             // 发送前再做一次 SSRF 检查：登记之后域名可能被改指向内网（DNS rebinding）
@@ -184,7 +192,7 @@ public class DeliveryWorker {
                 if (target.retryable()) {
                     handle(d, DeliverySender.Result.notSent(target.reason()));
                 } else {
-                    finish(d, store.dead(d, null, "blocked by SSRF policy: " + target.reason()));
+                    finish(d, store.dead(d, null, "blocked by SSRF policy: " + target.reason()), DeliveryResult.DEAD);
                 }
                 return;
             }
@@ -193,6 +201,7 @@ public class DeliveryWorker {
             if (!endpointPermits.tryAcquire(props.endpointPermitWait().toMillis(), TimeUnit.MILLISECONDS)) {
                 // 该端点太慢、排队太久：不发，退回 PENDING 并撤销计数，免得租约在途中过期
                 store.releaseUnattempted(d, RELEASE_DELAY);
+                metrics.deferred(Deferred.ENDPOINT_BUSY);
                 return;
             }
             try {
@@ -200,11 +209,13 @@ public class DeliveryWorker {
                 Duration open = guard.openFor(d.getEndpointId());
                 if (open != null) {
                     store.releaseUnattempted(d, open);
+                    metrics.deferred(Deferred.CIRCUIT_OPEN);
                     return;
                 }
                 Duration wait = guard.rateLimitWait(d.getEndpointId(), d.getDeliverQps());
                 if (wait != null) {
                     store.releaseUnattempted(d, wait);
+                    metrics.deferred(Deferred.RATE_LIMITED);
                     return;
                 }
                 handle(d, sender.send(d));
@@ -232,33 +243,41 @@ public class DeliveryWorker {
         attempt.setError(DeliveryStore.truncate(r.error(), 512));
         attempt.setResponseSnippet(r.snippet());
 
-        switch (RetryPolicy.classify(r.statusCode())) {
+        RetryPolicy.Outcome outcome = RetryPolicy.classify(r.statusCode());
+        metrics.attempt(Duration.ofMillis(r.durationMs()), outcome == RetryPolicy.Outcome.SUCCESS);
+        switch (outcome) {
             case SUCCESS -> {
                 guard.recordSuccess(d.getEndpointId());
-                finish(d, store.succeeded(d, attempt));
+                if (finish(d, store.succeeded(d, attempt), DeliveryResult.SUCCEEDED)) {
+                    metrics.endToEnd(Duration.between(d.getEventCreatedAt(), Instant.now()));
+                }
             }
-            case PERMANENT -> finish(d, store.dead(d, attempt, "non-retryable HTTP " + r.statusCode()));
+            case PERMANENT -> finish(d, store.dead(d, attempt, "non-retryable HTTP " + r.statusCode()),
+                    DeliveryResult.DEAD);
             case RETRY -> {
                 guard.recordFailure(d.getEndpointId(), props.breakerThreshold(), props.breakerCooldown());
                 String reason = r.error() != null ? r.error() : "HTTP " + r.statusCode();
-                if (d.getAttempts() >= d.getMaxAttempts()) {
-                    finish(d, store.dead(d, attempt, "attempts exhausted: " + reason));
+                if (d.attemptsThisRound() >= d.getMaxAttempts()) {
+                    finish(d, store.dead(d, attempt, "attempts exhausted: " + reason), DeliveryResult.DEAD);
                 } else {
                     attempt.setError(DeliveryStore.truncate(reason, 512));
-                    Duration delay = RetryPolicy.backoff(d.getAttempts(), props.backoffBase(), props.backoffMax(),
-                            r.retryAfter(), random);
-                    finish(d, store.retry(d, attempt, delay));
+                    Duration delay = RetryPolicy.backoff(d.attemptsThisRound(), props.backoffBase(),
+                            props.backoffMax(), r.retryAfter(), random);
+                    finish(d, store.retry(d, attempt, delay), DeliveryResult.RETRIED);
                 }
             }
         }
     }
 
-    private void finish(ClaimedDelivery d, boolean updated) {
+    /** @return 是否成功写回（false 表示租约已丢，结果只作为尝试记录保留） */
+    private boolean finish(ClaimedDelivery d, boolean updated, DeliveryResult result) {
         if (updated) {
             completed.incrementAndGet();
+            metrics.delivery(result);
         } else {
             log.warn("delivery {} attempt {} lost its lease; result kept as attempt record only",
                     d.getId(), d.getAttempts());
         }
+        return updated;
     }
 }

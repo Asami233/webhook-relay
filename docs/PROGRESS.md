@@ -50,6 +50,21 @@
   - Compose 中 Redis 由 `noeviction` 改为 `allkeys-lru` 且不持久化：Redis 只存可丢、带 TTL 的数据，满了应淘汰而不是拒写。
 - 已知局限（面试可讲）：SSRF 检查与 HttpClient 建连之间各自解析 DNS，仍有 rebinding 时间窗；熔断冷却后是“放行全部 + 一次失败即重开”，不是严格的单请求半开；被限流的任务会退回数据库再抢，限流很紧时有额外的数据库写。
 
-## D4 测试与指标 — 未开始
+## D4 测试与指标 — 完成（2026-10-14）
 
-Testcontainers 集成测试补齐、Micrometer 指标（`relay_delivery_total{result}`、`relay_delivery_latency_seconds`、`relay_backlog`、`relay_oldest_pending_seconds`）、模拟接收方 `/sink/{name}`；应做：Grafana 面板（本地 Compose）。另：死信人工重放可提前到 D4（需新迁移）。
+- 必做全部完成：
+  - Micrometer 指标（`RelayMetrics`）：`relay_delivery_total{result}`、`relay_delivery_latency_seconds`（端到端直方图）、`relay_delivery_attempt_seconds{outcome}`、`relay_backlog`、`relay_oldest_pending_seconds`、`relay_deliveries{status}`、`relay_delivery_deferred_total{reason}`、`relay_ingest_total{result}`；积压类由 `BacklogMetricsRefresher` 每 5 秒刷新。就绪探针包含数据库。日志带 delivery/event ID。
+  - 模拟接收方 `/sink/{id}`：按租户创建、配置失败率/状态码/延迟，统计重复投递；SSRF 只放行 `<base-url>/sink/<id>` 这一种形状（路径穿越、编码穿越、同主机其他路径均拒绝）。
+  - 集成测试补齐：死信重放（预算重置、`attempt_no` 连续）、停用端点拒绝重放、指标计数与积压、模拟接收方。
+- 提前完成：死信人工重放（V2 迁移 `attempts_base`/`replay_count`；单条与按端点批量；投递列表与详情 API）。
+- 应做完成：Grafana 面板（Compose `monitoring` profile，Prometheus v3.5.0 + Grafana 12.1.0，14 个面板，预置数据源与面板）。
+- 验收：`./mvnw verify` 共 86 项通过。真实运行：V2 迁移在已有数据的库上成功；模拟接收方 30% 失败 + 20–50 ms 延迟，200 个事件 → 接收方 279 次请求、199 个成功、0 重复，`/actuator/prometheus` 指标名与计划一致；Prometheus 目标 up、Grafana 经数据源查询到数据、浏览器中 14 个面板均有数据。
+- D5 线索（真实数据）：
+  - 端点默认 `deliverQps=20` 时 200 个事件产生 552 次“限流退回”（每次一来一回两次数据库写）——限流过紧时的放大效应，D5 调优对象。
+  - 堆上限为本机默认 8 GiB，上 1 GB 服务器前需定 `-Xmx`；连接池峰值 9/10 活跃，接近打满。
+- 环境：本机 9090 被代理客户端占用，Prometheus 主机端口改为 `PROMETHEUS_PORT`（默认 9091）。
+- 未验证：带 delivery/event ID 的日志行（本次运行无投递路径内的日志输出，只确认了空值时不残留标记）。
+
+## D5 压测与调优 — 未开始
+
+k6 脚本（接收吞吐、投递延迟、30% 失败率场景）、记录数据、调线程/连接池/批大小；应做：JVM 小内存参数对比（堆大小、GC）。产出“调优前后”数据表。已知调优对象见 D4“D5 线索”。

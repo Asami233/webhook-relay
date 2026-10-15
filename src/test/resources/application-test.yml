@@ -8,3 +8,5 @@ relay:
   ssrf:
     # 测试接收方监听 127.0.0.1；example.com 让接入类测试不依赖外部 DNS。localhost、10.x 等仍被拒绝。
     allowed-hosts: [127.0.0.1, example.com]
+  sink:
+    enabled: true
