@@ -1,12 +1,31 @@
-# 运行镜像：先在宿主机构建 jar（./mvnw -DskipTests package）与控制台（console/dist），这里只负责运行。
-# 不在镜像里跑 Maven：1 核小机器上构建很慢，CI 已经构建并测试过同一个 jar。
-FROM eclipse-temurin:21-jre-alpine
+# 多阶段构建：只需要 Docker 就能从源码构建并运行（jar 与控制台都在镜像里构建）。
+# 测试不在这里跑（Testcontainers 需要 Docker-in-Docker）；CI 已对同一份源码跑 ./mvnw verify。
 
+# ---- 后端 jar ----
+FROM eclipse-temurin:21-jdk-alpine AS backend
+WORKDIR /src
+COPY mvnw pom.xml ./
+COPY .mvn .mvn
+RUN chmod +x mvnw
+COPY src src
+# 缓存本地 Maven 仓库，重复构建不必重新下载依赖
+RUN --mount=type=cache,target=/root/.m2 ./mvnw -B -q -DskipTests package \
+    && cp target/webhook-relay-*.jar /src/app.jar
+
+# ---- 控制台 ----
+FROM node:22-alpine AS console
+WORKDIR /src
+COPY console/package.json console/package-lock.json ./
+RUN --mount=type=cache,target=/root/.npm npm ci
+COPY console ./
+RUN npm run build
+
+# ---- 运行 ----
+FROM eclipse-temurin:21-jre-alpine
 RUN addgroup -S relay && adduser -S relay -G relay
 WORKDIR /app
-COPY target/webhook-relay-*.jar app.jar
-# 控制台（cd console && npm ci && npm run build）；由应用在 /console/ 下提供
-COPY console/dist /app/console
+COPY --from=backend /src/app.jar app.jar
+COPY --from=console /src/dist /app/console
 ENV RELAY_CONSOLE_DIR=/app/console
 USER relay
 

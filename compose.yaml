@@ -1,5 +1,5 @@
 # 本地依赖：MySQL 8.4 + Redis 7。cp .env.example .env 后 docker compose up -d
-# 端口只绑定 127.0.0.1；MySQL 映射到 13306，避免与本机已有 MySQL 冲突。
+# 端口只绑定 127.0.0.1；MySQL 映射到 13306、Redis 映射到 16379，避免与本机已有服务及 Windows 保留端口段冲突。
 name: webhook-relay
 
 services:
@@ -45,7 +45,7 @@ services:
     command: ["redis-server", "--maxmemory", "32mb", "--maxmemory-policy", "allkeys-lru", "--save", "", "--appendonly", "no"]
     mem_limit: 64m
     ports:
-      - "127.0.0.1:${RELAY_REDIS_PORT:-6379}:6379"
+      - "127.0.0.1:${RELAY_REDIS_PORT:-16379}:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s

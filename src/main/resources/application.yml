@@ -23,7 +23,7 @@ spring:
   data:
     redis:
       host: ${RELAY_REDIS_HOST:localhost}
-      port: ${RELAY_REDIS_PORT:6379}
+      port: ${RELAY_REDIS_PORT:16379}
       # Redis 只做加速与限流，故障时要快速失败并放行（fail-open），不能拖住接收接口
       timeout: 500ms
       connect-timeout: 500ms

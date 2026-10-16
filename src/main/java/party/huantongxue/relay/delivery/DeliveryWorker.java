@@ -233,7 +233,11 @@ public class DeliveryWorker {
                 TokenBucket.Result slot = guard.reserveDelivery(d.getEndpointId(), d.getDeliverQps(),
                         Duration.ofMillis(Math.max(0, budgetMs)));
                 if (!slot.allowed()) {
-                    store.releaseUnattempted(d, slot.delay());
+                    // 同一时刻被拒的任务拿到的是同一个等待时间；不加抖动它们会一起回来再撞一次（惊群下移一层）。
+                    // 在 [delay, 2×delay] 内随机，错开回来的时间。
+                    long delayMs = slot.delay().toMillis();
+                    store.releaseUnattempted(d,
+                            Duration.ofMillis(delayMs + ThreadLocalRandom.current().nextLong(delayMs + 1)));
                     metrics.deferred(Deferred.RATE_LIMITED);
                     return;
                 }

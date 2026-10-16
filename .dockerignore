@@ -1,3 +1,9 @@
+# 构建上下文只放构建需要的源码；本地产物、依赖与秘密一律不进镜像
 *
-!target/webhook-relay-*.jar
-!console/dist/**
+!pom.xml
+!mvnw
+!.mvn/
+!src/
+!console/
+console/node_modules/
+console/dist/
