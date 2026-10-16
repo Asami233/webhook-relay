@@ -18,6 +18,15 @@ docker compose up -d --wait # MySQL(127.0.0.1:13306) + Redis
 ./mvnw spring-boot:run      # http://localhost:8080，启动时 Flyway 自动建表
 ```
 
+控制台（Vue 3）：
+
+```bash
+cd console && npm ci && npm run build   # 产出 console/dist，由后端在 http://localhost:8080/console/ 提供
+npm run dev                             # 或开发模式：http://localhost:5173/console/，API 代理到 8080
+```
+
+用租户 API Key 登录；“演示”页一键生成 1000 个事件打到 30% 失败率的模拟接收方，实时看重试、死信和送达率。
+
 也可以把 Relay 本身放进容器（CPU/内存上限模拟 1 核 1G VPS，参数依据见 [docs/BENCHMARK.md](docs/BENCHMARK.md)）：
 
 ```bash
@@ -50,6 +59,8 @@ docker compose --profile app up -d --build --force-recreate --wait
 | GET | `/api/v1/deliveries/{id}` | API Key | 投递详情与每次尝试（状态码、耗时、错误、响应前 1 KB） |
 | POST | `/api/v1/deliveries/{id}/replay` | API Key | 死信重放：本轮重新获得 `maxAttempts` 次机会，尝试历史保留 |
 | POST | `/api/v1/endpoints/{id}/replay-dead` | API Key | 接收方修好后批量重放该端点全部死信 |
+| GET | `/api/v1/stats` | API Key | 概览：按状态的投递数、最近 60 分钟每分钟成功/失败尝试 |
+| POST | `/api/v1/demo` | API Key | 一键演示（需 `RELAY_SINK_ENABLED=true`）：建模拟接收方与端点并在后台写入事件 |
 | POST / GET / PUT / DELETE | `/api/v1/sinks[/{id}[/config]]` | API Key | 模拟接收方（需 `RELAY_SINK_ENABLED=true`）：失败率、失败状态码、延迟；统计重复投递 |
 
 ```bash

@@ -46,6 +46,9 @@ relay:
   ssrf:
     # 跳过 SSRF 检查的主机（按 URL 里的字面主机名精确匹配）。生产保持为空。
     allowed-hosts: []
+  console:
+    # 控制台静态文件目录（cd console && npm run build 产出）；镜像里为 /app/console
+    dir: ${RELAY_CONSOLE_DIR:console/dist}
   sink:
     # 内置模拟接收方 /sink/{id}（演示用）。开启后 SSRF 只放行 <base-url>/sink/ 这一个路径前缀。
     enabled: ${RELAY_SINK_ENABLED:false}

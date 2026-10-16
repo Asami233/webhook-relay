@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN" "https://mybatis.org/dtd/mybatis-3-mapper.dtd">
+<mapper namespace="party.huantongxue.relay.stats.StatsMapper">
+
+    <!-- 走 idx_delivery_tenant_status(tenant_id, status, id) -->
+    <select id="countByStatus" resultType="party.huantongxue.relay.delivery.StatusCount">
+        SELECT status, COUNT(*) AS n FROM delivery WHERE tenant_id = #{tenantId} GROUP BY status
+    </select>
+
+    <select id="countEvents" resultType="long">
+        SELECT COUNT(*) FROM event WHERE tenant_id = #{tenantId}
+    </select>
+
+    <!-- 先用 idx_attempt_started 取时间窗口内的尝试，再按租户过滤；分钟取整在数据库里做（UTC） -->
+    <select id="attemptsPerMinute" resultType="party.huantongxue.relay.stats.MinuteCount">
+        SELECT DATE_SUB(a.started_at, INTERVAL (SECOND(a.started_at) * 1000000 + MICROSECOND(a.started_at)) MICROSECOND)
+                   AS minute,
+               SUM(a.status_code BETWEEN 200 AND 299) AS ok,
+               SUM(a.status_code IS NULL OR a.status_code NOT BETWEEN 200 AND 299) AS failed
+        FROM delivery_attempt a
+        JOIN delivery d ON d.id = a.delivery_id
+        WHERE a.started_at &gt;= DATE_SUB(NOW(3), INTERVAL #{minutes} MINUTE)
+          AND d.tenant_id = #{tenantId}
+        GROUP BY minute
+        ORDER BY minute
+    </select>
+</mapper>

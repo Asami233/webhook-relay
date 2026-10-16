@@ -18,3 +18,19 @@ jobs:
       # Testcontainers 使用 runner 自带的 Docker 启动 MySQL
       - name: Build and test
         run: ./mvnw -B verify
+
+  console:
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: console
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+      - run: npm ci
+      # vue-tsc 类型检查 + vite 构建
+      - run: npm run build

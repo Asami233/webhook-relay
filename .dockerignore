@@ -1,2 +1,3 @@
 *
 !target/webhook-relay-*.jar
+!console/dist/**
