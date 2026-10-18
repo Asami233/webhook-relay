@@ -112,6 +112,8 @@ services:
       GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
       GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in .env}
       GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/relay.json
+      # 界面默认简体中文（菜单、按钮等 Grafana 自带文字）；个人可在“个人资料 → 偏好设置”里改回
+      GF_USERS_DEFAULT_LANGUAGE: zh-Hans
     volumes:
       - ./ops/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
       - ./ops/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro

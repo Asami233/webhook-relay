@@ -1,6 +1,6 @@
 {
   "uid": "webhook-relay",
-  "title": "Webhook Relay",
+  "title": "Webhook Relay 投递监控",
   "tags": [
     "relay"
   ],
@@ -125,7 +125,7 @@
       "id": 3,
       "type": "stat",
       "title": "积压（已到期未抢）",
-      "description": "",
+      "description": "已到下次尝试时间、还没被投递进程抢走的任务数；持续上涨说明投递跟不上",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -183,7 +183,7 @@
       "id": 4,
       "type": "stat",
       "title": "死信",
-      "description": "",
+      "description": "重试次数用尽或收到不可重试响应的投递；在控制台“投递 → 死信”里可重放",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -237,7 +237,7 @@
       "id": 5,
       "type": "timeseries",
       "title": "接收（次/秒）",
-      "description": "",
+      "description": "POST /api/v1/events 每秒请求数，按结果分类",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -250,13 +250,62 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "reqps",
+          "unit": "suffix: 次/秒",
           "custom": {
             "lineWidth": 2,
             "fillOpacity": 10
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "accepted"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "已接收"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "replayed"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "幂等命中（重复请求）"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rate_limited"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "被限流（429）"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "overloaded"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "过载拒绝（503）"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -283,7 +332,7 @@
       "id": 6,
       "type": "timeseries",
       "title": "投递结果（次/秒）",
-      "description": "",
+      "description": "每秒写回的投递结果：成功、失败待重试、进入死信",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -296,13 +345,50 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
+          "unit": "suffix: 次/秒",
           "custom": {
             "lineWidth": 2,
             "fillOpacity": 10
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "succeeded"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "成功"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "retried"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "失败，稍后重试"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dead"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "进入死信"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -329,7 +415,7 @@
       "id": 7,
       "type": "timeseries",
       "title": "端到端延迟",
-      "description": "",
+      "description": "事件创建到成功送达的耗时分位数，含排队、限流与重试退避",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -384,7 +470,7 @@
       "id": 8,
       "type": "timeseries",
       "title": "单次 HTTP 尝试耗时 P99",
-      "description": "",
+      "description": "单次 HTTP 请求接收方的耗时 P99，按成功 / 失败分开",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -403,7 +489,32 @@
             "fillOpacity": 10
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "success"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "成功的尝试"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "failure"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "失败的尝试"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -485,7 +596,7 @@
       "id": 10,
       "type": "timeseries",
       "title": "未完成任务（按状态）",
-      "description": "",
+      "description": "各状态的任务数（成功的不在此列，只看未结束和死信）",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -504,7 +615,44 @@
             "fillOpacity": 10
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "pending"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "待投递"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "in_flight"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "投递中"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "dead"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "死信"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -544,13 +692,50 @@
       },
       "fieldConfig": {
         "defaults": {
-          "unit": "ops",
+          "unit": "suffix: 次/秒",
           "custom": {
             "lineWidth": 2,
             "fillOpacity": 10
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "rate_limited"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "端点限速"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "circuit_open"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "熔断中"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "endpoint_busy"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "端点并发已满"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {
@@ -577,7 +762,7 @@
       "id": 12,
       "type": "timeseries",
       "title": "JVM 堆",
-      "description": "",
+      "description": "JVM 堆内存已用与上限",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -632,7 +817,7 @@
       "id": 13,
       "type": "timeseries",
       "title": "数据库连接",
-      "description": "",
+      "description": "Hikari 连接池：正在使用的连接与排队等连接的请求；“等待”长期大于 0 说明连接池不够",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -687,7 +872,7 @@
       "id": 14,
       "type": "timeseries",
       "title": "GC 暂停（秒/秒）",
-      "description": "",
+      "description": "每秒花在 GC 停顿上的秒数（0.1 即 10% 的时间在停顿）",
       "datasource": {
         "type": "prometheus",
         "uid": "prometheus"
@@ -706,7 +891,68 @@
             "fillOpacity": 10
           }
         },
-        "overrides": []
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Copy"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "新生代（Serial）"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "MarkSweepCompact"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "老年代（Serial）"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "G1 Young Generation"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "新生代（G1）"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "G1 Old Generation"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "老年代（G1）"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "G1 Concurrent GC"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "并发周期（G1）"
+              }
+            ]
+          }
+        ]
       },
       "options": {
         "legend": {

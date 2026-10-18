@@ -132,7 +132,7 @@ curl -X POST localhost:8080/api/v1/events \
 - `GET /actuator/prometheus`：`relay_delivery_total{result}`、`relay_delivery_latency_seconds`（事件创建 → 成功送达）、`relay_delivery_attempt_seconds{outcome}`、`relay_backlog`、`relay_oldest_pending_seconds`、`relay_deliveries{status}`、`relay_delivery_deferred_total{reason}`、`relay_ingest_total{result}`。标签只用低基数类别。
 - `/actuator/health/liveness`、`/actuator/health/readiness`（就绪要求数据库可用；Redis 故障时 fail-open，不影响就绪）。
 - 投递日志带 `[delivery=… event=…]`。
-- 本地面板：`docker compose --profile monitoring up -d`，Grafana <http://127.0.0.1:3000>（预置 14 个面板），Prometheus <http://127.0.0.1:9091>。
+- 本地面板：`docker compose --profile monitoring up -d`，Grafana <http://127.0.0.1:3000>（预置 14 个面板，界面与图例为中文），Prometheus <http://127.0.0.1:9091>。
 
 ## 文档
 

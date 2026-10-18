@@ -100,10 +100,18 @@
 - **一键启动**：`Dockerfile` 改为多阶段构建（JDK 编译 jar、Node 构建控制台、JRE 运行），只需 Docker；`scripts/quickstart.sh` 生成随机口令的 `.env` → 构建并启动 → 创建演示租户 → 打印控制台地址与 API Key。在“全新副本”（仅含仓库文件，无 `.env`/`node_modules`/`target`，独立 Compose 项目名）中实测通过；随后用打印的 Key 跑演示 200 个事件、30% 失败：60 秒时 198/200 送达（其余 2 条在退避中）、0 重复、0 死信。
 - **README** 重写：一键启动、架构图与投递状态机（Mermaid）、设计要点（可靠性 / 幂等限流过载 / 安全 / 性能）、API、签名校验、可观测性、取舍。
 - **面试对照表** `docs/INTERVIEW.md`：按可靠性、MySQL、Redis、并发与 JVM、Spring、安全、测试运维分组，每条“答案 + 代码位置”。
-- **个人网站**（`huantongxue` 仓库，未提交）：`site/src/data/projects.ts` 新增项目卡片（链接到案例文章），`site/src/content/posts/webhook-relay.md` 案例文章；本地 `npm run build` 通过，零 JS、CSS 10.4 KB、首页 20 KB，满足该仓库 CI 预算。
+- **个人网站**（`huantongxue` 仓库 `main` b66caa8，已推送并自动部署，CI 通过；<https://huantongxue.party/posts/webhook-relay/>）：`site/src/data/projects.ts` 新增项目卡片（链接到案例文章），`site/src/content/posts/webhook-relay.md` 案例文章；本地 `npm run build` 通过，零 JS、CSS 10.4 KB、首页 20 KB，满足该仓库 CI 预算。
 - **修复 D5 的不稳定测试**：根因是投递侧被拒的任务同一时刻拿到同一个等待时间，一起回来再撞（惊群下移一层）；退回延迟改为 [delay, 2×delay] 随机，断言改为“平均每条 ≤ 2 次”。本地连续 3 次通过。
 - **端口**：Windows 重启后又保留了 6285–6384，Redis 主机端口改为 **16379**（MySQL 13306 同理）。
 - 验收：`./mvnw verify` 93 项通过；一键启动在全新副本中通过。
 - **截图与 GIF**：在一键启动的环境里跑 1000 个事件、30% 失败的演示录制 `docs/images/demo.gif`（8 帧，71 KB），另有概览与投递详情截图（WebP，19–25 KB），顶栏的 Key 前缀已涂掉。README 顶部与网站文章引用；网站侧经 Astro 图片管线压缩、懒加载，构建后零 JS、CSS 10.4 KB、首页 20 KB。
 - 录制中出现 1 条死信：连续 8 次 503（30% 失败率下每条约 0.0066%，1200 条里出现至少一条的概率约 7.6%），重试间隔从 5 秒增长到约 5 分钟，符合设计；用重放接口重放后第 10 次尝试成功。
 - 视觉检查：概览、演示、投递详情、文章页在浏览器里看过，布局与配色正常；未检查手机宽度。
+- 线上：webhook-relay 已推送（d556b31），CI 两个任务（build、console）均通过。D6 那次 CI 失败与 D5 是同一个不稳定测试，已在 D7 修复。
+- 过程记录：网站仓库当时停在本地分支 `relay`（门户 AI 中转的未推送工作），提交先误落在该分支上、推送的是未变化的 `main`，远端未受影响；随后在独立 worktree 里把提交 cherry-pick 到 `main` 推送，并把 `relay` 分支与工作区恢复原样（`git status` 前后一致）。网站仓库的 `STATUS.md` 有用户未提交的修改，未改动。
+
+## 补充：Grafana 中文化（2026-10-18）
+
+- Compose 里 Grafana 加 `GF_USERS_DEFAULT_LANGUAGE=zh-Hans`，菜单、按钮等界面文字默认简体中文（个人可在偏好设置里改回）。
+- 面板标题改为“Webhook Relay 投递监控”；图例里的英文标签值（`accepted`、`retried`、`rate_limited`、`Copy` 等）用字段覆盖显示为中文，Prometheus 中的标签值不变；空说明的面板补了中文说明（悬停面板标题旁的 ⓘ 可见）；速率单位改为“次/秒”。
+- 本地真实运行：`--profile app --profile monitoring` 启动，跑 300 个事件、30% 失败的演示，浏览器里 14 个面板的标题、图例、单位均为中文。Grafana 自带的时间范围选择器（“Last 15 minutes”“Refresh”）在 12.1 的中文包里仍为英文，无法通过配置改。
